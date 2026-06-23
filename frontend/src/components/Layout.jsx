@@ -107,17 +107,17 @@ export default function Layout({ children }) {
   const isActive = (path) => path === '/' ? location.pathname === '/' : (location.pathname === path || location.pathname.startsWith(path + '/'));
 
   return (
-    <div className="min-h-screen bg-navy flex overflow-x-clip max-w-[100vw]">
+    <div className="cq-shell min-h-screen bg-navy flex overflow-x-clip max-w-[100vw]">
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex flex-col w-[248px] bg-surface border-r border-border min-h-screen fixed left-0 top-0 z-30">
+      <aside className="cq-sidebar hidden md:flex flex-col w-[248px] bg-surface border-r border-border min-h-screen fixed left-0 top-0 z-30">
         <div
           className="flex items-center gap-2.5 px-4 py-4 cursor-pointer"
           onClick={() => navigate('/')}
         >
-          <div className="w-7 h-7 rounded-md bg-accent flex items-center justify-center">
+          <div className="cq-brand-mark w-7 h-7 rounded-md bg-accent flex items-center justify-center">
             <Swords size={14} className="text-navy" />
           </div>
-          <span className="text-cream text-[15px] font-semibold">ChoreQuest</span>
+          <span className="cq-brand-title text-cream text-[15px] font-semibold">Chore Quest</span>
         </div>
 
         <nav className="flex flex-col gap-0.5 px-3 mt-1 flex-1">
@@ -128,9 +128,9 @@ export default function Layout({ children }) {
               <button
                 key={item.path}
                 onClick={() => navigate(item.path)}
-                className={`flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors text-left text-sm ${
+                className={`cq-nav-item flex items-center gap-2.5 px-3 py-2 rounded-md transition-colors text-left text-sm ${
                   active
-                    ? 'bg-surface-raised text-cream'
+                    ? 'cq-nav-item-active bg-surface-raised text-cream'
                     : 'text-muted hover:text-cream hover:bg-surface-raised'
                 }`}
               >
@@ -143,7 +143,7 @@ export default function Layout({ children }) {
 
         {user && (
           <div
-            className="flex items-center gap-2.5 px-4 py-3 border-t border-border cursor-pointer hover:bg-surface-raised transition-colors"
+            className="cq-profile-link flex items-center gap-2.5 px-4 py-3 border-t border-border cursor-pointer hover:bg-surface-raised transition-colors"
             onClick={() => navigate('/profile')}
           >
             <AvatarDisplay
@@ -163,9 +163,9 @@ export default function Layout({ children }) {
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col md:ml-[248px] min-h-screen min-w-0">
+      <div className="cq-main flex-1 flex flex-col md:ml-[248px] min-h-screen min-w-0">
         {/* Top Bar */}
-        <header className="sticky top-0 z-20 bg-surface border-b border-border px-4 py-2.5 flex items-center justify-between">
+        <header className="cq-topbar sticky top-0 z-20 bg-surface border-b border-border px-4 py-2.5 flex items-center justify-between">
           <div className="flex items-center gap-2">
             {!isHome && (
               <button
@@ -180,10 +180,10 @@ export default function Layout({ children }) {
               className="flex items-center gap-2 cursor-pointer md:hidden"
               onClick={() => navigate('/')}
             >
-              <div className="w-6 h-6 rounded bg-accent flex items-center justify-center">
+              <div className="cq-brand-mark w-6 h-6 rounded bg-accent flex items-center justify-center">
                 <Swords size={12} className="text-navy" />
               </div>
-              <span className="text-cream text-sm font-semibold">ChoreQuest</span>
+              <span className="cq-brand-title text-cream text-sm font-semibold">Chore Quest</span>
             </div>
           </div>
 
@@ -210,7 +210,7 @@ export default function Layout({ children }) {
 
               {/* Notification Panel */}
               {showNotifs && (
-                <div className="fixed right-2 left-2 sm:left-auto sm:absolute sm:right-0 top-12 sm:top-full sm:mt-1 sm:w-80 max-h-96 bg-surface border border-border rounded-md overflow-hidden z-50">
+                <div className="cq-popover fixed right-2 left-2 sm:left-auto sm:absolute sm:right-0 top-12 sm:top-full sm:mt-1 sm:w-80 max-h-96 bg-surface border border-border rounded-md overflow-hidden z-50">
                   <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
                     <span className="text-cream text-sm font-semibold">Notifications</span>
                     <div className="flex items-center gap-1">
@@ -334,11 +334,11 @@ export default function Layout({ children }) {
           </div>
         )}
 
-        <main className="flex-1 p-4 pb-24 md:pb-6 overflow-x-clip">{children}</main>
+        <main className="cq-content flex-1 p-4 pb-24 md:pb-6 overflow-x-clip">{children}</main>
       </div>
 
       {/* Mobile Bottom Nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-surface border-t border-border" ref={moreRef}>
+      <nav className="cq-mobile-nav md:hidden fixed bottom-0 left-0 right-0 z-30 bg-surface border-t border-border" ref={moreRef}>
         {showMore && moreNavItems.length > 0 && (
           <div className="absolute bottom-full left-0 right-0 bg-surface border-t border-border">
             {moreNavItems.map((item) => {
