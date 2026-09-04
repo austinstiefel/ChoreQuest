@@ -1,17 +1,27 @@
 services:
-  chorequest:
-    build: .
-    ports:
-      - "8122:8122"
-    environment:
-      - SECRET_KEY=${SECRET_KEY}
-      - TZ=Europe/London
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8122/api/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
+    chorequest:
+        build: .
+        container_name: chorequest
+        restart: unless-stopped
+
+        environment:
+            - SECRET_KEY=${SECRET_KEY}
+            - TZ=${TZ}
+            - COOKIE_SECURE=true
+
+        volumes:
+            - ./data:/app/data
+
+        networks:
+            - proxy
+
+        healthcheck:
+            test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8122/api/health')"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 15s
+
+networks:
+    proxy:
+        external: true
