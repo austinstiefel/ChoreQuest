@@ -1,104 +1,131 @@
-const TOKEN_KEY = 'chorequest_access_token';
+const TOKEN_KEY = "chorequest_access_token";
 
 let accessToken = null;
 
 // Restore token from localStorage on module load
 try {
-  accessToken = localStorage.getItem(TOKEN_KEY);
-} catch { /* SSR / private browsing */ }
+	accessToken = localStorage.getItem(TOKEN_KEY);
+} catch {
+	/* SSR / private browsing */
+}
 
 export function setAccessToken(token) {
-  accessToken = token;
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch { /* ignore */ }
+	accessToken = token;
+	try {
+		if (token) localStorage.setItem(TOKEN_KEY, token);
+		else localStorage.removeItem(TOKEN_KEY);
+	} catch {
+		/* ignore */
+	}
 }
 
 export function getAccessToken() {
-  return accessToken;
+	return accessToken;
 }
 
 export function clearAccessToken() {
-  accessToken = null;
-  try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+	accessToken = null;
+	try {
+		localStorage.removeItem(TOKEN_KEY);
+	} catch {
+		/* ignore */
+	}
 }
 
 async function refreshToken() {
-  const res = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
-  if (!res.ok) {
-    clearAccessToken();
-    throw new Error('Session expired');
-  }
-  const data = await res.json();
-  setAccessToken(data.access_token);
-  return data;
+	const res = await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
+	if (!res.ok) {
+		clearAccessToken();
+		throw new Error("Session expired");
+	}
+	const data = await res.json();
+	setAccessToken(data.access_token);
+	return data;
 }
 
 export async function ensureToken() {
-  if (!refreshPromise) {
-    refreshPromise = refreshToken().finally(() => { refreshPromise = null; });
-  }
-  return refreshPromise;
+	if (!refreshPromise) {
+		refreshPromise = refreshToken().finally(() => {
+			refreshPromise = null;
+		});
+	}
+	return refreshPromise;
 }
 
 let refreshPromise = null;
 
 export async function api(path, options = {}) {
-  const { body, method = 'GET', headers = {}, raw = false } = options;
+	const { body, method = "GET", headers = {}, raw = false } = options;
 
-  const config = {
-    method,
-    credentials: 'include',
-    headers: { ...headers },
-  };
+	const config = {
+		method,
+		credentials: "include",
+		headers: { ...headers },
+	};
 
-  if (accessToken) {
-    config.headers['Authorization'] = `Bearer ${accessToken}`;
-  }
+	if (accessToken) {
+		config.headers["Authorization"] = `Bearer ${accessToken}`;
+	}
 
-  if (body && !(body instanceof FormData)) {
-    config.headers['Content-Type'] = 'application/json';
-    config.body = JSON.stringify(body);
-  } else if (body instanceof FormData) {
-    config.body = body;
-  }
+	if (body && !(body instanceof FormData)) {
+		config.headers["Content-Type"] = "application/json";
+		config.body = JSON.stringify(body);
+	} else if (body instanceof FormData) {
+		config.body = body;
+	}
 
-  let res = await fetch(path, config);
+	let res = await fetch(path, config);
 
-  // If 401, try refreshing token and retry once
-  if (res.status === 401 && !options._retried) {
-    try {
-      await ensureToken();
-      config.headers['Authorization'] = `Bearer ${accessToken}`;
-      res = await fetch(path, { ...config, _retried: true });
-    } catch {
-      window.dispatchEvent(new CustomEvent('auth:expired'));
-      throw new Error('Session expired');
-    }
-  }
+	// If 401, try refreshing token and retry once.
+	// Login/authentication requests should return their actual error
+	// instead of attempting a token refresh.
+	if (res.status === 401 && !options._retried && !path.startsWith("/api/auth/login") && !path.startsWith("/api/auth/pin-login") && !path.startsWith("/api/auth/setup-status")) {
+		try {
+			await ensureToken();
+			config.headers["Authorization"] = `Bearer ${accessToken}`;
+			res = await fetch(path, { ...config, _retried: true });
+		} catch {
+			window.dispatchEvent(new CustomEvent("auth:expired"));
+			throw new Error("Session expired");
+		}
+	}
 
-  if (raw) return res;
+	if (raw) return res;
 
-  if (res.status === 204) return null;
+	if (res.status === 204) return null;
 
-  if (!res.ok) {
-    const text = await res.text();
-    let detail = 'Request failed';
-    try {
-      const data = JSON.parse(text);
-      detail = data.detail || detail;
-    } catch {
-      // Response wasn't JSON (server error page, etc.)
-    }
-    throw new Error(detail);
-  }
+	if (!res.ok) {
+		const text = await res.text();
+		let detail = "Request failed";
 
-  const text = await res.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error('Invalid response from server');
-  }
+		try {
+			const data = JSON.parse(text);
+
+			if (typeof data.detail === "string") {
+				detail = data.detail;
+			} else if (Array.isArray(data.detail)) {
+				detail = data.detail
+					.map((error) => {
+						const location = Array.isArray(error.loc) ? error.loc.join(".") : "";
+
+						const message = error.msg || "Invalid value";
+
+						return location ? `${location}: ${message}` : message;
+					})
+					.join("; ");
+			}
+		} catch {
+			// Response wasn't JSON (server error page, etc.)
+		}
+
+		throw new Error(detail);
+	}
+
+	const text = await res.text();
+	if (!text) return null;
+	try {
+		return JSON.parse(text);
+	} catch {
+		throw new Error("Invalid response from server");
+	}
 }

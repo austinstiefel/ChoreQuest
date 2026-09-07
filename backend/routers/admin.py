@@ -9,10 +9,11 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models import User, ApiKey, InviteCode, AuditLog, AppSetting
+from backend.models import User, UserRole, ApiKey, InviteCode, AuditLog, AppSetting
 from backend.schemas import (
     UserResponse,
     AdminUserUpdate,
+    AdminUserCreate,
     AdminResetPasswordRequest,
     ApiKeyCreate,
     ApiKeyResponse,
@@ -26,6 +27,23 @@ from backend.dependencies import require_admin, require_parent, get_current_user
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
+async def _is_last_active_admin(
+    user: User,
+    db: AsyncSession,
+) -> bool:
+    """Return True if this user is the only active administrator."""
+
+    if user.role != UserRole.admin or not user.is_active:
+        return False
+
+    result = await db.execute(
+        select(func.count(User.id)).where(
+            User.role == UserRole.admin,
+            User.is_active == True,
+        )
+    )
+
+    return result.scalar_one() <= 1
 
 # ============================================================
 # Users
@@ -42,6 +60,32 @@ async def list_users(
     users = result.scalars().all()
     return [UserResponse.model_validate(u) for u in users]
 
+# ---------- POST /users ----------
+@router.post("/users", response_model=UserResponse)
+async def create_user(
+    body: AdminUserCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Create a new user as an admin."""
+    result = await db.execute(
+        select(User).where(User.username == body.username)
+    )
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Username already taken")
+
+    user = User(
+        username=body.username,
+        display_name=body.display_name,
+        password_hash=hash_password(body.password),
+        role=body.role,
+    )
+
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    return UserResponse.model_validate(user)
 
 # ---------- PUT /users/{id} ----------
 @router.put("/users/{user_id}", response_model=UserResponse)
@@ -57,8 +101,22 @@ async def update_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
+    if await _is_last_active_admin(user, db):
+        if body.role is not None and body.role != UserRole.admin:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot change the role of the only active administrator",
+            )
+
+        if body.is_active is False:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot deactivate the only active administrator",
+            )
+
     if body.role is not None:
         user.role = body.role
+
     if body.is_active is not None:
         user.is_active = body.is_active
 
@@ -80,6 +138,12 @@ async def deactivate_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if await _is_last_active_admin(user, db):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot deactivate the only active administrator",
+        )
 
     user.is_active = False
     user.updated_at = datetime.now(timezone.utc)

@@ -1,737 +1,857 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { api } from '../api/client';
-import { useAuth } from '../hooks/useAuth';
-import Modal from '../components/Modal';
-import {
-  Shield,
-  Users,
-  Key,
-  Ticket,
-  ScrollText,
-  Plus,
-  Trash2,
-  Copy,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  ArrowLeft,
-  Loader2,
-  Eye,
-  EyeOff,
-  RotateCcw,
-} from 'lucide-react';
+import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
+import { api } from "../api/client";
+import { useAuth } from "../hooks/useAuth";
+import Modal from "../components/Modal";
+import { Shield, Users, Key, Ticket, ScrollText, Plus, Trash2, Copy, Check, ChevronLeft, ChevronRight, ArrowLeft, Loader2, Eye, EyeOff, RotateCcw } from "lucide-react";
 
 const TABS = [
-  { key: 'users', label: 'Users', icon: Users },
-  { key: 'api-keys', label: 'API Keys', icon: Key },
-  { key: 'invite-codes', label: 'Invite Codes', icon: Ticket },
-  { key: 'audit-log', label: 'Audit Log', icon: ScrollText },
+	{ key: "users", label: "Users", icon: Users },
+	{ key: "api-keys", label: "API Keys", icon: Key },
+	{ key: "invite-codes", label: "Invite Codes", icon: Ticket },
+	{ key: "audit-log", label: "Audit Log", icon: ScrollText },
 ];
 
 // ─── Users Tab ───────────────────────────────────────────────────────
 function UsersTab() {
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+	const [users, setUsers] = useState([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState("");
+	const [showCreateUser, setShowCreateUser] = useState(false);
+	const [createUserErrors, setCreateUserErrors] = useState({});
+	const [showResetPassword, setShowResetPassword] = useState(false);
+	const [resetPasswordUser, setResetPasswordUser] = useState(null);
+	const [showDeleteUser, setShowDeleteUser] = useState(false);
+	const [deleteUserTarget, setDeleteUserTarget] = useState(null);
+	const [newUser, setNewUser] = useState({
+		username: "",
+		display_name: "",
+		password: "",
+		role: "kid",
+	});
+	const [newPassword, setNewPassword] = useState("");
+	const [resetPasswordError, setResetPasswordError] = useState("");
+	const [resetPasswordSubmitting, setResetPasswordSubmitting] = useState(false);
 
-  const fetchUsers = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await api('/api/admin/users');
-      setUsers(Array.isArray(data) ? data : (data.users || []));
-    } catch (err) {
-      setError(err.message || 'Failed to load users');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+	const fetchUsers = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			const data = await api("/api/admin/users");
+			setUsers(Array.isArray(data) ? data : data.users || []);
+		} catch (err) {
+			setError(err.message || "Failed to load users");
+		} finally {
+			setLoading(false);
+		}
+	}, []);
 
-  useEffect(() => {
-    fetchUsers();
-  }, [fetchUsers]);
+	useEffect(() => {
+		fetchUsers();
+	}, [fetchUsers]);
 
-  const updateRole = async (userId, newRole) => {
-    try {
-      await api(`/api/admin/users/${userId}`, {
-        method: 'PUT',
-        body: { role: newRole },
-      });
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u))
-      );
-    } catch (err) {
-      setError(err.message || 'Failed to update role');
-    }
-  };
+	const updateRole = async (userId, newRole) => {
+		try {
+			await api(`/api/admin/users/${userId}`, {
+				method: "PUT",
+				body: { role: newRole },
+			});
+			setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
+		} catch (err) {
+			setError(err.message || "Failed to update role");
+		}
+	};
 
-  const resetPassword = async (usr) => {
-    const newPassword = window.prompt(`New password for ${usr.display_name || usr.username} (min 6 chars):`);
-    if (!newPassword) return;
-    if (newPassword.length < 6) {
-      setError('Password must be at least 6 characters');
-      return;
-    }
-    try {
-      await api(`/api/admin/users/${usr.id}/reset-password`, {
-        method: 'POST',
-        body: { new_password: newPassword },
-      });
-      setError('');
-      alert(`Password reset for ${usr.display_name || usr.username}`);
-    } catch (err) {
-      setError(err.message || 'Failed to reset password');
-    }
-  };
+	const openResetPassword = (usr) => {
+		setResetPasswordUser(usr);
+		setNewPassword("");
+		setResetPasswordError("");
+		setShowResetPassword(true);
+	};
 
-  const toggleActive = async (usr) => {
-    try {
-      await api(`/api/admin/users/${usr.id}`, {
-        method: 'PUT',
-        body: { is_active: !usr.is_active },
-      });
-      setUsers((prev) =>
-        prev.map((u) =>
-          u.id === usr.id ? { ...u, is_active: !u.is_active } : u
-        )
-      );
-    } catch (err) {
-      setError(err.message || 'Failed to toggle user status');
-    }
-  };
+	const submitResetPassword = async () => {
+		setResetPasswordError("");
 
-  if (loading) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 size={28} className="text-accent animate-spin" />
-      </div>
-    );
-  }
+		if (!newPassword) {
+			setResetPasswordError("Password is required");
+			return;
+		}
 
-  return (
-    <div>
-      {error && (
-        <div className="mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm">
-          {error}
-        </div>
-      )}
+		if (newPassword.length < 6) {
+			setResetPasswordError("Password should have at least 6 characters");
+			return;
+		}
 
-      {users.length === 0 ? (
-        <p className="text-muted text-center py-8 text-sm">
-          No users yet.
-        </p>
-      ) : (
-        <div className="space-y-3">
-          {users.map((usr) => (
-            <div key={usr.id} className="p-3 rounded-md bg-surface-raised/30 border border-border space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-cream text-sm font-medium truncate">{usr.username}</p>
-                  {usr.display_name && (
-                    <p className="text-muted text-xs truncate">{usr.display_name}</p>
-                  )}
-                </div>
-                <span
-                  className={`inline-block px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${
-                    usr.is_active !== false
-                      ? 'bg-emerald/10 text-emerald border border-emerald/30'
-                      : 'bg-crimson/10 text-crimson border border-crimson/30'
-                  }`}
-                >
-                  {usr.is_active !== false ? 'Active' : 'Inactive'}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <select
-                  value={usr.role}
-                  onChange={(e) => updateRole(usr.id, e.target.value)}
-                  className="field-input !py-1.5 !text-xs flex-1"
-                >
-                  <option value="kid">kid</option>
-                  <option value="parent">parent</option>
-                  <option value="admin">admin</option>
-                </select>
-                <button
-                  onClick={() => resetPassword(usr)}
-                  className="game-btn game-btn-blue !py-1.5 !px-3 !text-[10px] flex-shrink-0"
-                >
-                  <RotateCcw size={12} className="inline mr-1" />Password
-                </button>
-                <button
-                  onClick={() => toggleActive(usr)}
-                  className={`game-btn !py-1.5 !px-3 !text-[10px] flex-shrink-0 ${
-                    usr.is_active !== false ? 'game-btn-red' : 'game-btn-blue'
-                  }`}
-                >
-                  {usr.is_active !== false ? (
-                    <><EyeOff size={12} className="inline mr-1" />Deactivate</>
-                  ) : (
-                    <><Eye size={12} className="inline mr-1" />Activate</>
-                  )}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+		if (!resetPasswordUser) {
+			setResetPasswordError("No user selected");
+			return;
+		}
+
+		setResetPasswordSubmitting(true);
+
+		try {
+			await api(`/api/admin/users/${resetPasswordUser.id}/reset-password`, {
+				method: "POST",
+				body: { new_password: newPassword },
+			});
+
+			setShowResetPassword(false);
+			setResetPasswordUser(null);
+			setNewPassword("");
+			setResetPasswordError("");
+		} catch (err) {
+			setResetPasswordError(err.message || "Failed to reset password");
+		} finally {
+			setResetPasswordSubmitting(false);
+		}
+	};
+
+	const createUser = async () => {
+		setCreateUserErrors({});
+		setError("");
+
+		try {
+			await api("/api/admin/users", {
+				method: "POST",
+				body: newUser,
+			});
+
+			setShowCreateUser(false);
+			setNewUser({
+				username: "",
+				display_name: "",
+				password: "",
+				role: "kid",
+			});
+
+			await fetchUsers();
+		} catch (err) {
+			const message = err.message || "Failed to create user";
+
+			const fieldErrors = {};
+			const parts = message.split("; ");
+
+			parts.forEach((part) => {
+				const match = part.match(/^body\.(\w+):\s*(.+)$/);
+
+				if (match) {
+					const field = match[1];
+					let message = match[2];
+
+					if (message.startsWith("String should have at least")) {
+						const characterCount = message.match(/\d+/)?.[0];
+
+						if (characterCount) {
+							const fieldNames = {
+								username: "Username",
+								display_name: "Display Name",
+								password: "Password",
+							};
+
+							const fieldName = fieldNames[field] || field;
+
+							message = `${fieldName} should have at least ${characterCount} characters`;
+						}
+					}
+
+					fieldErrors[field] = message;
+				}
+			});
+
+			if (Object.keys(fieldErrors).length > 0) {
+				setCreateUserErrors(fieldErrors);
+			} else {
+				setCreateUserErrors({
+					form: message,
+				});
+			}
+		}
+	};
+
+	const openDeleteUser = (usr) => {
+		setDeleteUserTarget(usr);
+		setShowDeleteUser(true);
+	};
+
+	if (loading) {
+		return (
+			<div className='flex justify-center py-12'>
+				<Loader2 size={28} className='text-accent animate-spin' />
+			</div>
+		);
+	}
+
+	const activeAdminCount = users.filter((u) => u.role === "admin" && u.is_active !== false).length;
+
+	return (
+		<div>
+			{error && <div className='mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm'>{error}</div>}
+
+			<div className='flex justify-end mb-4'>
+				<button
+					onClick={() => {
+						setCreateUserErrors({});
+						setShowCreateUser(true);
+					}}
+					className='game-btn game-btn-blue flex items-center gap-2'>
+					<Plus size={14} />
+					Create User
+				</button>
+			</div>
+
+			{users.length === 0 ? (
+				<p className='text-muted text-center py-8 text-sm'>No users yet.</p>
+			) : (
+				<div className='space-y-3'>
+					{users.map((usr) => {
+						const isOnlyActiveAdmin = usr.role === "admin" && usr.is_active !== false && activeAdminCount === 1;
+
+						return (
+							<div key={usr.id} className='p-3 rounded-md bg-surface-raised/30 border border-border space-y-2'>
+								<div className='flex items-center justify-between gap-2'>
+									<div className='min-w-0'>
+										<p className='text-cream text-sm font-medium truncate'>{usr.username}</p>
+										{usr.display_name && <p className='text-muted text-xs truncate'>{usr.display_name}</p>}
+									</div>
+
+									<span className={`inline-block px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${usr.is_active !== false ? "bg-emerald/10 text-emerald border border-emerald/30" : "bg-crimson/10 text-crimson border border-crimson/30"}`}>{usr.is_active !== false ? "Active" : "Inactive"}</span>
+								</div>
+
+								<div className='flex items-center gap-2'>
+									{/* Role selector */}
+									<div className='flex-1' title={isOnlyActiveAdmin ? "You cannot change the role of the only admin account!" : undefined}>
+										<select value={usr.role} onChange={(e) => updateRole(usr.id, e.target.value)} disabled={isOnlyActiveAdmin} className={`field-input !py-1.5 !text-xs w-full ${isOnlyActiveAdmin ? "opacity-40 cursor-not-allowed" : ""}`}>
+											<option value='kid'>kid</option>
+											<option value='parent'>parent</option>
+											<option value='admin'>admin</option>
+										</select>
+									</div>
+
+									{/* Password reset */}
+									<button onClick={() => openResetPassword(usr)} className='game-btn game-btn-blue !py-1.5 !px-3 !text-[10px] flex-shrink-0'>
+										<RotateCcw size={12} className='inline mr-1' />
+										Password
+									</button>
+
+									{/* Activate / Deactivate */}
+									<div title={isOnlyActiveAdmin ? "You cannot delete the only admin account!" : undefined}>
+										<button onClick={() => openDeleteUser(usr)} disabled={isOnlyActiveAdmin} className={`game-btn game-btn-red !py-1.5 !px-3 !text-[10px] flex-shrink-0 ${isOnlyActiveAdmin ? "opacity-40 cursor-not-allowed" : ""}`}>
+											<Trash2 size={12} className='inline mr-1' />
+											Delete User
+										</button>
+									</div>
+								</div>
+							</div>
+						);
+					})}
+				</div>
+			)}
+
+			{/* Create User Modal */}
+			<Modal
+				isOpen={showCreateUser}
+				onClose={() => setShowCreateUser(false)}
+				title='Create User'
+				actions={[
+					{
+						label: "Cancel",
+						onClick: () => setShowCreateUser(false),
+						className: "game-btn game-btn-red",
+					},
+					{
+						label: "Create User",
+						onClick: createUser,
+						className: "game-btn game-btn-blue",
+					},
+				]}>
+				<div className='space-y-4'>
+					{createUserErrors.form && <div className='p-2.5 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-sm'>{createUserErrors.form}</div>}
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Username</label>
+						<input
+							type='text'
+							value={newUser.username}
+							onChange={(e) => {
+								setNewUser((prev) => ({
+									...prev,
+									username: e.target.value,
+								}));
+
+								setCreateUserErrors((prev) => ({
+									...prev,
+									username: undefined,
+								}));
+							}}
+							placeholder='Username'
+							className='field-input'
+						/>
+						{createUserErrors.username && <div className='mt-1.5 p-2 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-xs'>{createUserErrors.username}</div>}
+					</div>
+
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Display Name</label>
+						<input
+							type='text'
+							value={newUser.display_name}
+							onChange={(e) => {
+								setNewUser((prev) => ({
+									...prev,
+									display_name: e.target.value,
+								}));
+
+								setCreateUserErrors((prev) => ({
+									...prev,
+									display_name: undefined,
+								}));
+							}}
+							placeholder='Display name'
+							className='field-input'
+						/>
+						{createUserErrors.display_name && <div className='mt-1.5 p-2 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-xs'>{createUserErrors.display_name}</div>}
+					</div>
+
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Password</label>
+						<input
+							type='password'
+							value={newUser.password}
+							onChange={(e) => {
+								setNewUser((prev) => ({
+									...prev,
+									password: e.target.value,
+								}));
+
+								setCreateUserErrors((prev) => ({
+									...prev,
+									password: undefined,
+								}));
+							}}
+							placeholder='Minimum 6 characters'
+							className='field-input'
+						/>
+						{createUserErrors.password && <div className='mt-1.5 p-2 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-xs'>{createUserErrors.password}</div>}
+					</div>
+
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Role</label>
+						<select
+							value={newUser.role}
+							onChange={(e) =>
+								setNewUser((prev) => ({
+									...prev,
+									role: e.target.value,
+								}))
+							}
+							className='field-input'>
+							<option value='kid'>Kid</option>
+							<option value='parent'>Parent</option>
+							<option value='admin'>Admin</option>
+						</select>
+					</div>
+				</div>
+			</Modal>
+
+			{/* Reset Password Modal */}
+			<Modal
+				isOpen={showResetPassword}
+				onClose={() => setShowResetPassword(false)}
+				title='Reset Password'
+				actions={[
+					{
+						label: "Cancel",
+						onClick: () => setShowResetPassword(false),
+						className: "game-btn game-btn-red",
+					},
+					{
+						label: resetPasswordSubmitting ? "Resetting..." : "Reset Password",
+						onClick: submitResetPassword,
+						className: "game-btn game-btn-blue",
+						disabled: resetPasswordSubmitting,
+					},
+				]}>
+				<div className='space-y-4'>
+					<div>
+						<p className='text-muted text-sm mb-3'>
+							Reset the password for <span className='text-cream font-medium'>{resetPasswordUser?.username}</span>.
+						</p>
+
+						<label className='block text-cream text-sm font-medium mb-2'>New Password</label>
+
+						<input
+							type='password'
+							value={newPassword}
+							onChange={(e) => {
+								setNewPassword(e.target.value);
+								setResetPasswordError("");
+							}}
+							placeholder='Minimum 6 characters'
+							className='field-input'
+						/>
+
+						{resetPasswordError && <div className='mt-1.5 p-2 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-xs'>{resetPasswordError}</div>}
+					</div>
+				</div>
+			</Modal>
+		</div>
+	);
 }
 
 // ─── API Keys Tab ────────────────────────────────────────────────────
 function ApiKeysTab() {
-  const [keys, setKeys] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+	const [keys, setKeys] = useState([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState("");
 
-  // Create modal
-  const [createModal, setCreateModal] = useState(false);
-  const [newKeyName, setNewKeyName] = useState('');
-  const [createSubmitting, setCreateSubmitting] = useState(false);
-  const [newKeyValue, setNewKeyValue] = useState('');
-  const [copied, setCopied] = useState(false);
+	// Create modal
+	const [createModal, setCreateModal] = useState(false);
+	const [newKeyName, setNewKeyName] = useState("");
+	const [createSubmitting, setCreateSubmitting] = useState(false);
+	const [newKeyValue, setNewKeyValue] = useState("");
+	const [copied, setCopied] = useState(false);
 
-  const fetchKeys = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await api('/api/admin/api-keys');
-      setKeys(Array.isArray(data) ? data : (data.keys || []));
-    } catch (err) {
-      setError(err.message || 'Failed to load API keys');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+	const fetchKeys = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			const data = await api("/api/admin/api-keys");
+			setKeys(Array.isArray(data) ? data : data.keys || []);
+		} catch (err) {
+			setError(err.message || "Failed to load API keys");
+		} finally {
+			setLoading(false);
+		}
+	}, []);
 
-  useEffect(() => {
-    fetchKeys();
-  }, [fetchKeys]);
+	useEffect(() => {
+		fetchKeys();
+	}, [fetchKeys]);
 
-  const createKey = async () => {
-    if (!newKeyName.trim()) return;
-    setCreateSubmitting(true);
-    try {
-      const data = await api('/api/admin/api-keys', {
-        method: 'POST',
-        body: { name: newKeyName.trim() },
-      });
-      setNewKeyValue(data.key || data.api_key || data.token || '');
-      fetchKeys();
-    } catch (err) {
-      setError(err.message || 'Failed to create key');
-      setCreateModal(false);
-    } finally {
-      setCreateSubmitting(false);
-    }
-  };
+	const createKey = async () => {
+		if (!newKeyName.trim()) return;
+		setCreateSubmitting(true);
+		try {
+			const data = await api("/api/admin/api-keys", {
+				method: "POST",
+				body: { name: newKeyName.trim() },
+			});
+			setNewKeyValue(data.key || data.api_key || data.token || "");
+			fetchKeys();
+		} catch (err) {
+			setError(err.message || "Failed to create key");
+			setCreateModal(false);
+		} finally {
+			setCreateSubmitting(false);
+		}
+	};
 
-  const deleteKey = async (id) => {
-    try {
-      await api(`/api/admin/api-keys/${id}`, { method: 'DELETE' });
-      setKeys((prev) => prev.filter((k) => k.id !== id));
-    } catch (err) {
-      setError(err.message || 'Failed to delete key');
-    }
-  };
+	const deleteKey = async (id) => {
+		try {
+			await api(`/api/admin/api-keys/${id}`, { method: "DELETE" });
+			setKeys((prev) => prev.filter((k) => k.id !== id));
+		} catch (err) {
+			setError(err.message || "Failed to delete key");
+		}
+	};
 
-  const copyToClipboard = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Fallback
-    }
-  };
+	const copyToClipboard = async (text) => {
+		try {
+			await navigator.clipboard.writeText(text);
+			setCopied(true);
+			setTimeout(() => setCopied(false), 2000);
+		} catch {
+			// Fallback
+		}
+	};
 
-  const closeCreateModal = () => {
-    setCreateModal(false);
-    setNewKeyName('');
-    setNewKeyValue('');
-    setCopied(false);
-  };
+	const closeCreateModal = () => {
+		setCreateModal(false);
+		setNewKeyName("");
+		setNewKeyValue("");
+		setCopied(false);
+	};
 
-  if (loading) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 size={28} className="text-accent animate-spin" />
-      </div>
-    );
-  }
+	if (loading) {
+		return (
+			<div className='flex justify-center py-12'>
+				<Loader2 size={28} className='text-accent animate-spin' />
+			</div>
+		);
+	}
 
-  return (
-    <div>
-      {error && (
-        <div className="mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm">
-          {error}
-        </div>
-      )}
+	return (
+		<div>
+			{error && <div className='mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm'>{error}</div>}
 
-      <div className="flex justify-end mb-4">
-        <button
-          onClick={() => setCreateModal(true)}
-          className="game-btn game-btn-blue flex items-center gap-2"
-        >
-          <Plus size={14} />
-          Create Key
-        </button>
-      </div>
+			<div className='flex justify-end mb-4'>
+				<button onClick={() => setCreateModal(true)} className='game-btn game-btn-blue flex items-center gap-2'>
+					<Plus size={14} />
+					Create Key
+				</button>
+			</div>
 
-      {keys.length === 0 ? (
-        <p className="text-muted text-center py-8 text-sm">
-          No API keys yet.
-        </p>
-      ) : (
-        <div className="space-y-3">
-          {keys.map((k) => (
-            <div key={k.id} className="p-3 rounded-md bg-surface-raised/30 border border-border">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <p className="text-cream text-sm font-medium truncate min-w-0">
-                  {k.name}
-                </p>
-                <button
-                  onClick={() => deleteKey(k.id)}
-                  className="p-1.5 rounded hover:bg-crimson/10 text-crimson/60 hover:text-crimson transition-colors flex-shrink-0"
-                  title="Delete key"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                <span className="text-muted text-xs">
-                  Prefix: <span className="text-accent">{k.prefix || k.key_prefix || '***'}</span>
-                </span>
-                {k.scopes && (
-                  <span className="text-muted text-xs">
-                    Scopes: <span className="text-purple">{Array.isArray(k.scopes) ? k.scopes.join(', ') : k.scopes}</span>
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+			{keys.length === 0 ? (
+				<p className='text-muted text-center py-8 text-sm'>No API keys yet.</p>
+			) : (
+				<div className='space-y-3'>
+					{keys.map((k) => (
+						<div key={k.id} className='p-3 rounded-md bg-surface-raised/30 border border-border'>
+							<div className='flex items-center justify-between gap-2 mb-1'>
+								<p className='text-cream text-sm font-medium truncate min-w-0'>{k.name}</p>
+								<button onClick={() => deleteKey(k.id)} className='p-1.5 rounded hover:bg-crimson/10 text-crimson/60 hover:text-crimson transition-colors flex-shrink-0' title='Delete key'>
+									<Trash2 size={14} />
+								</button>
+							</div>
 
-      {/* Create Key Modal */}
-      <Modal
-        isOpen={createModal}
-        onClose={closeCreateModal}
-        title={newKeyValue ? 'Key Created!' : 'Create API Key'}
-        actions={
-          newKeyValue
-            ? [
-                {
-                  label: 'Done',
-                  onClick: closeCreateModal,
-                  className: 'game-btn game-btn-blue',
-                },
-              ]
-            : [
-                {
-                  label: 'Cancel',
-                  onClick: closeCreateModal,
-                  className: 'game-btn game-btn-red',
-                },
-                {
-                  label: createSubmitting ? 'Creating...' : 'Create',
-                  onClick: createKey,
-                  className: 'game-btn game-btn-blue',
-                  disabled: createSubmitting || !newKeyName.trim(),
-                },
-              ]
-        }
-      >
-        {newKeyValue ? (
-          <div className="space-y-3">
-            <p className="text-muted text-sm">
-              Copy this key now. It will not be shown again!
-            </p>
-            <div className="flex gap-2">
-              <code className="flex-1 bg-navy p-3 rounded border border-accent/30 text-accent text-sm break-all">
-                {newKeyValue}
-              </code>
-              <button
-                onClick={() => copyToClipboard(newKeyValue)}
-                className="flex-shrink-0 p-2 rounded hover:bg-surface-raised transition-colors"
-                title="Copy"
-              >
-                {copied ? (
-                  <Check size={18} className="text-emerald" />
-                ) : (
-                  <Copy size={18} className="text-muted" />
-                )}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            <label className="block text-cream text-sm font-medium mb-2">
-              Key Name
-            </label>
-            <input
-              type="text"
-              value={newKeyName}
-              onChange={(e) => setNewKeyName(e.target.value)}
-              placeholder="e.g. Mobile App"
-              className="field-input"
-            />
-          </div>
-        )}
-      </Modal>
-    </div>
-  );
+							<div className='flex flex-wrap gap-x-3 gap-y-1'>
+								<span className='text-muted text-xs'>
+									Prefix: <span className='text-accent'>{k.prefix || k.key_prefix || "***"}</span>
+								</span>
+
+								{k.scopes && (
+									<span className='text-muted text-xs'>
+										Scopes: <span className='text-purple'>{Array.isArray(k.scopes) ? k.scopes.join(", ") : k.scopes}</span>
+									</span>
+								)}
+							</div>
+						</div>
+					))}
+				</div>
+			)}
+
+			{/* Create Key Modal */}
+			<Modal
+				isOpen={createModal}
+				onClose={closeCreateModal}
+				title={newKeyValue ? "Key Created!" : "Create API Key"}
+				actions={
+					newKeyValue
+						? [
+								{
+									label: "Done",
+									onClick: closeCreateModal,
+									className: "game-btn game-btn-blue",
+								},
+							]
+						: [
+								{
+									label: "Cancel",
+									onClick: closeCreateModal,
+									className: "game-btn game-btn-red",
+								},
+								{
+									label: createSubmitting ? "Creating..." : "Create",
+									onClick: createKey,
+									className: "game-btn game-btn-blue",
+									disabled: createSubmitting || !newKeyName.trim(),
+								},
+							]
+				}>
+				{newKeyValue ? (
+					<div className='space-y-3'>
+						<p className='text-muted text-sm'>Copy this key now. It will not be shown again!</p>
+
+						<div className='flex gap-2'>
+							<code className='flex-1 bg-navy p-3 rounded border border-accent/30 text-accent text-sm break-all'>{newKeyValue}</code>
+
+							<button onClick={() => copyToClipboard(newKeyValue)} className='flex-shrink-0 p-2 rounded hover:bg-surface-raised transition-colors' title='Copy'>
+								{copied ? <Check size={18} className='text-emerald' /> : <Copy size={18} className='text-muted' />}
+							</button>
+						</div>
+					</div>
+				) : (
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Key Name</label>
+						<input type='text' value={newKeyName} onChange={(e) => setNewKeyName(e.target.value)} placeholder='e.g. Mobile App' className='field-input' />
+					</div>
+				)}
+			</Modal>
+		</div>
+	);
 }
 
 // ─── Invite Codes Tab ────────────────────────────────────────────────
 function InviteCodesTab() {
-  const [codes, setCodes] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+	const [codes, setCodes] = useState([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState("");
 
-  // Create modal
-  const [createModal, setCreateModal] = useState(false);
-  const [newRole, setNewRole] = useState('kid');
-  const [newMaxUses, setNewMaxUses] = useState('');
-  const [createSubmitting, setCreateSubmitting] = useState(false);
+	// Create modal
+	const [createModal, setCreateModal] = useState(false);
+	const [newRole, setNewRole] = useState("kid");
+	const [newMaxUses, setNewMaxUses] = useState("");
+	const [createSubmitting, setCreateSubmitting] = useState(false);
 
-  const fetchCodes = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await api('/api/admin/invite-codes');
-      setCodes(Array.isArray(data) ? data : (data.codes || []));
-    } catch (err) {
-      setError(err.message || 'Failed to load invite codes');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+	const fetchCodes = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			const data = await api("/api/admin/invite-codes");
+			setCodes(Array.isArray(data) ? data : data.codes || []);
+		} catch (err) {
+			setError(err.message || "Failed to load invite codes");
+		} finally {
+			setLoading(false);
+		}
+	}, []);
 
-  useEffect(() => {
-    fetchCodes();
-  }, [fetchCodes]);
+	useEffect(() => {
+		fetchCodes();
+	}, [fetchCodes]);
 
-  const createCode = async () => {
-    setCreateSubmitting(true);
-    try {
-      const body = { role: newRole };
-      if (newMaxUses) body.max_uses = parseInt(newMaxUses, 10);
-      await api('/api/admin/invite-codes', { method: 'POST', body });
-      setCreateModal(false);
-      setNewRole('kid');
-      setNewMaxUses('');
-      fetchCodes();
-    } catch (err) {
-      setError(err.message || 'Failed to create code');
-    } finally {
-      setCreateSubmitting(false);
-    }
-  };
+	const createCode = async () => {
+		setCreateSubmitting(true);
+		try {
+			const body = { role: newRole };
+			if (newMaxUses) body.max_uses = parseInt(newMaxUses, 10);
+			await api("/api/admin/invite-codes", { method: "POST", body });
+			setCreateModal(false);
+			setNewRole("kid");
+			setNewMaxUses("");
+			fetchCodes();
+		} catch (err) {
+			setError(err.message || "Failed to create code");
+		} finally {
+			setCreateSubmitting(false);
+		}
+	};
 
-  const deleteCode = async (id) => {
-    try {
-      await api(`/api/admin/invite-codes/${id}`, { method: 'DELETE' });
-      setCodes((prev) => prev.filter((c) => c.id !== id));
-    } catch (err) {
-      setError(err.message || 'Failed to delete code');
-    }
-  };
+	const deleteCode = async (id) => {
+		try {
+			await api(`/api/admin/invite-codes/${id}`, { method: "DELETE" });
+			setCodes((prev) => prev.filter((c) => c.id !== id));
+		} catch (err) {
+			setError(err.message || "Failed to delete code");
+		}
+	};
 
-  if (loading) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 size={28} className="text-accent animate-spin" />
-      </div>
-    );
-  }
+	if (loading) {
+		return (
+			<div className='flex justify-center py-12'>
+				<Loader2 size={28} className='text-accent animate-spin' />
+			</div>
+		);
+	}
 
-  return (
-    <div>
-      {error && (
-        <div className="mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm">
-          {error}
-        </div>
-      )}
+	return (
+		<div>
+			{error && <div className='mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm'>{error}</div>}
 
-      <div className="flex justify-end mb-4">
-        <button
-          onClick={() => setCreateModal(true)}
-          className="game-btn game-btn-blue flex items-center gap-2"
-        >
-          <Plus size={14} />
-          Create Code
-        </button>
-      </div>
+			<div className='flex justify-end mb-4'>
+				<button onClick={() => setCreateModal(true)} className='game-btn game-btn-blue flex items-center gap-2'>
+					<Plus size={14} />
+					Create Code
+				</button>
+			</div>
 
-      {codes.length === 0 ? (
-        <p className="text-muted text-center py-8 text-sm">
-          No invite codes yet.
-        </p>
-      ) : (
-        <div className="space-y-3">
-          {codes.map((c) => (
-            <div key={c.id} className="p-3 rounded-md bg-surface-raised/30 border border-border">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <p className="text-cream text-sm font-medium truncate min-w-0">
-                  {c.code}
-                </p>
-                <button
-                  onClick={() => deleteCode(c.id)}
-                  className="p-1.5 rounded hover:bg-crimson/10 text-crimson/60 hover:text-crimson transition-colors flex-shrink-0"
-                  title="Delete code"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                <span className="text-muted text-xs">
-                  Role: <span className="text-purple">{c.role}</span>
-                </span>
-                <span className="text-muted text-xs">
-                  Uses:{' '}
-                  <span className="text-accent">
-                    {c.times_used ?? 0}
-                    {c.max_uses ? ` / ${c.max_uses}` : ' / ∞'}
-                  </span>
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+			{codes.length === 0 ? (
+				<p className='text-muted text-center py-8 text-sm'>No invite codes yet.</p>
+			) : (
+				<div className='space-y-3'>
+					{codes.map((c) => (
+						<div key={c.id} className='p-3 rounded-md bg-surface-raised/30 border border-border'>
+							<div className='flex items-center justify-between gap-2 mb-1'>
+								<p className='text-cream text-sm font-medium truncate min-w-0'>{c.code}</p>
 
-      {/* Create Code Modal */}
-      <Modal
-        isOpen={createModal}
-        onClose={() => setCreateModal(false)}
-        title="Create Invite Code"
-        actions={[
-          {
-            label: 'Cancel',
-            onClick: () => setCreateModal(false),
-            className: 'game-btn game-btn-red',
-          },
-          {
-            label: createSubmitting ? 'Creating...' : 'Create',
-            onClick: createCode,
-            className: 'game-btn game-btn-blue',
-            disabled: createSubmitting,
-          },
-        ]}
-      >
-        <div className="space-y-4">
-          <div>
-            <label className="block text-cream text-sm font-medium mb-2">
-              Role
-            </label>
-            <select
-              value={newRole}
-              onChange={(e) => setNewRole(e.target.value)}
-              className="field-input"
-            >
-              <option value="kid">kid</option>
-              <option value="parent">parent</option>
-              <option value="admin">admin</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-cream text-sm font-medium mb-2">
-              Max Uses (optional)
-            </label>
-            <input
-              type="number"
-              min={1}
-              value={newMaxUses}
-              onChange={(e) => setNewMaxUses(e.target.value)}
-              placeholder="Unlimited"
-              className="field-input"
-            />
-          </div>
-        </div>
-      </Modal>
-    </div>
-  );
+								<button onClick={() => deleteCode(c.id)} className='p-1.5 rounded hover:bg-crimson/10 text-crimson/60 hover:text-crimson transition-colors flex-shrink-0' title='Delete code'>
+									<Trash2 size={14} />
+								</button>
+							</div>
+
+							<div className='flex flex-wrap gap-x-3 gap-y-1'>
+								<span className='text-muted text-xs'>
+									Role: <span className='text-purple'>{c.role}</span>
+								</span>
+
+								<span className='text-muted text-xs'>
+									Uses:{" "}
+									<span className='text-accent'>
+										{c.times_used ?? 0}
+										{c.max_uses ? ` / ${c.max_uses}` : " / ∞"}
+									</span>
+								</span>
+							</div>
+						</div>
+					))}
+				</div>
+			)}
+
+			{/* Create Code Modal */}
+			<Modal
+				isOpen={createModal}
+				onClose={() => setCreateModal(false)}
+				title='Create Invite Code'
+				actions={[
+					{
+						label: "Cancel",
+						onClick: () => setCreateModal(false),
+						className: "game-btn game-btn-red",
+					},
+					{
+						label: createSubmitting ? "Creating..." : "Create",
+						onClick: createCode,
+						className: "game-btn game-btn-blue",
+						disabled: createSubmitting,
+					},
+				]}>
+				<div className='space-y-4'>
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Role</label>
+						<select value={newRole} onChange={(e) => setNewRole(e.target.value)} className='field-input'>
+							<option value='kid'>kid</option>
+							<option value='parent'>parent</option>
+							<option value='admin'>admin</option>
+						</select>
+					</div>
+
+					<div>
+						<label className='block text-cream text-sm font-medium mb-2'>Max Uses (optional)</label>
+						<input type='number' min={1} value={newMaxUses} onChange={(e) => setNewMaxUses(e.target.value)} placeholder='Unlimited' className='field-input' />
+					</div>
+				</div>
+			</Modal>
+		</div>
+	);
 }
 
 // ─── Audit Log Tab ───────────────────────────────────────────────────
 function AuditLogTab() {
-  const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [offset, setOffset] = useState(0);
-  const limit = 50;
+	const [entries, setEntries] = useState([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState("");
+	const [offset, setOffset] = useState(0);
+	const limit = 50;
 
-  const fetchLog = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await api(`/api/admin/audit-log?limit=${limit}&offset=${offset}`);
-      setEntries(Array.isArray(data) ? data : (data.entries || data.logs || []));
-    } catch (err) {
-      setError(err.message || 'Failed to load audit log');
-    } finally {
-      setLoading(false);
-    }
-  }, [offset]);
+	const fetchLog = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			const data = await api(`/api/admin/audit-log?limit=${limit}&offset=${offset}`);
+			setEntries(Array.isArray(data) ? data : data.entries || data.logs || []);
+		} catch (err) {
+			setError(err.message || "Failed to load audit log");
+		} finally {
+			setLoading(false);
+		}
+	}, [offset]);
 
-  useEffect(() => {
-    fetchLog();
-  }, [fetchLog]);
+	useEffect(() => {
+		fetchLog();
+	}, [fetchLog]);
 
-  const formatTimestamp = (ts) => {
-    if (!ts) return '--';
-    const d = new Date(ts);
-    return d.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
+	const formatTimestamp = (ts) => {
+		if (!ts) return "--";
+		const d = new Date(ts);
+		return d.toLocaleString(undefined, {
+			month: "short",
+			day: "numeric",
+			hour: "2-digit",
+			minute: "2-digit",
+		});
+	};
 
-  if (loading) {
-    return (
-      <div className="flex justify-center py-12">
-        <Loader2 size={28} className="text-accent animate-spin" />
-      </div>
-    );
-  }
+	if (loading) {
+		return (
+			<div className='flex justify-center py-12'>
+				<Loader2 size={28} className='text-accent animate-spin' />
+			</div>
+		);
+	}
 
-  return (
-    <div>
-      {error && (
-        <div className="mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm">
-          {error}
-        </div>
-      )}
+	return (
+		<div>
+			{error && <div className='mb-4 p-3 rounded border border-crimson/40 bg-crimson/10 text-crimson text-sm'>{error}</div>}
 
-      {entries.length === 0 ? (
-        <p className="text-muted text-center py-8 text-sm">
-          No audit log entries yet.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {entries.map((entry, idx) => (
-            <div key={entry.id || idx} className="p-3 rounded-md bg-surface-raised/30 border border-border">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <span className="text-accent text-xs font-medium">{entry.action}</span>
-                <span className="text-muted text-[10px] flex-shrink-0">{formatTimestamp(entry.created_at)}</span>
-              </div>
-              <p className="text-muted text-xs break-all">
-                {entry.user_id != null ? `User #${entry.user_id}` : '--'}
-                {(entry.details && entry.details !== '--') && (
-                  <span className="ml-2 text-muted/70">
-                    {typeof entry.details === 'object'
-                      ? JSON.stringify(entry.details)
-                      : entry.details}
-                  </span>
-                )}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
+			{entries.length === 0 ? (
+				<p className='text-muted text-center py-8 text-sm'>No audit log entries yet.</p>
+			) : (
+				<div className='space-y-2'>
+					{entries.map((entry, idx) => (
+						<div key={entry.id || idx} className='p-3 rounded-md bg-surface-raised/30 border border-border'>
+							<div className='flex items-center justify-between gap-2 mb-1'>
+								<span className='text-accent text-xs font-medium'>{entry.action}</span>
+								<span className='text-muted text-[10px] flex-shrink-0'>{formatTimestamp(entry.created_at)}</span>
+							</div>
 
-      {/* Pagination */}
-      <div className="flex items-center justify-between mt-4 pt-4 border-t border-border">
-        <button
-          onClick={() => setOffset(Math.max(0, offset - limit))}
-          disabled={offset === 0}
-          className={`game-btn game-btn-blue !py-2 !px-3 flex items-center gap-1 ${
-            offset === 0 ? 'opacity-30 cursor-not-allowed' : ''
-          }`}
-        >
-          <ChevronLeft size={14} />
-          Prev
-        </button>
+							<p className='text-muted text-xs break-all'>
+								{entry.user_id != null ? `User #${entry.user_id}` : "--"}
+								{entry.details && entry.details !== "--" && <span className='ml-2 text-muted/70'>{typeof entry.details === "object" ? JSON.stringify(entry.details) : entry.details}</span>}
+							</p>
+						</div>
+					))}
+				</div>
+			)}
 
-        <span className="text-muted text-xs">
-          Showing {offset + 1} - {offset + entries.length}
-        </span>
+			{/* Pagination */}
+			<div className='flex items-center justify-between mt-4 pt-4 border-t border-border'>
+				<button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0} className={`game-btn game-btn-blue !py-2 !px-3 flex items-center gap-1 ${offset === 0 ? "opacity-30 cursor-not-allowed" : ""}`}>
+					<ChevronLeft size={14} />
+					Prev
+				</button>
 
-        <button
-          onClick={() => setOffset(offset + limit)}
-          disabled={entries.length < limit}
-          className={`game-btn game-btn-blue !py-2 !px-3 flex items-center gap-1 ${
-            entries.length < limit ? 'opacity-30 cursor-not-allowed' : ''
-          }`}
-        >
-          Next
-          <ChevronRight size={14} />
-        </button>
-      </div>
-    </div>
-  );
+				<span className='text-muted text-xs'>
+					Showing {offset + 1} - {offset + entries.length}
+				</span>
+
+				<button onClick={() => setOffset(offset + limit)} disabled={entries.length < limit} className={`game-btn game-btn-blue !py-2 !px-3 flex items-center gap-1 ${entries.length < limit ? "opacity-30 cursor-not-allowed" : ""}`}>
+					Next
+					<ChevronRight size={14} />
+				</button>
+			</div>
+		</div>
+	);
 }
 
 // ─── Main AdminDashboard ─────────────────────────────────────────────
 export default function AdminDashboard() {
-  const { user } = useAuth();
-  const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('users');
+	const { user } = useAuth();
+	const navigate = useNavigate();
+	const [activeTab, setActiveTab] = useState("users");
 
-  if (user?.role !== 'admin') {
-    return (
-      <div className="max-w-xl mx-auto text-center py-20">
-        <Shield size={48} className="text-crimson/30 mx-auto mb-4" />
-        <h1 className="text-cream text-base font-semibold mb-2">
-          Access Denied
-        </h1>
-        <p className="text-muted text-sm">
-          Only administrators can access this page.
-        </p>
-      </div>
-    );
-  }
+	if (user?.role !== "admin") {
+		return (
+			<div className='max-w-xl mx-auto text-center py-20'>
+				<Shield size={48} className='text-crimson/30 mx-auto mb-4' />
+				<h1 className='text-cream text-base font-semibold mb-2'>Access Denied</h1>
+				<p className='text-muted text-sm'>Only administrators can access this page.</p>
+			</div>
+		);
+	}
 
-  return (
-    <div className="w-full max-w-2xl mx-auto overflow-hidden">
-      {/* Back + Header */}
-      <button
-        onClick={() => navigate('/profile')}
-        className="flex items-center gap-1.5 text-muted hover:text-cream transition-colors mb-4 text-sm"
-      >
-        <ArrowLeft size={16} />
-        Profile
-      </button>
-      <div className="flex items-center gap-3 mb-6">
-        <Shield size={24} className="text-accent" />
-        <h1 className="text-cream text-lg font-semibold">
-          Admin Dashboard
-        </h1>
-      </div>
+	return (
+		<div className='w-full max-w-2xl mx-auto overflow-hidden'>
+			{/* Back + Header */}
+			<button onClick={() => navigate("/profile")} className='flex items-center gap-1.5 text-muted hover:text-cream transition-colors mb-4 text-sm'>
+				<ArrowLeft size={16} />
+				Profile
+			</button>
 
-      {/* Tabs */}
-      <div className="grid grid-cols-4 gap-1 mb-6">
-        {TABS.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.key;
-          return (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`flex flex-col items-center gap-1 px-1 py-2.5 rounded-md border transition-colors text-[10px] sm:text-[11px] font-medium overflow-hidden ${
-                isActive
-                  ? 'bg-accent/10 border-accent/30 text-accent'
-                  : 'border-border text-muted hover:text-cream hover:border-border-light'
-              }`}
-            >
-              <Icon size={16} />
-              <span className="truncate w-full text-center leading-tight">{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
+			<div className='flex items-center gap-3 mb-6'>
+				<Shield size={24} className='text-accent' />
+				<h1 className='text-cream text-lg font-semibold'>Admin Dashboard</h1>
+			</div>
 
-      {/* Tab content */}
-      <div className="game-panel p-4">
-        {activeTab === 'users' && <UsersTab />}
-        {activeTab === 'api-keys' && <ApiKeysTab />}
-        {activeTab === 'invite-codes' && <InviteCodesTab />}
-        {activeTab === 'audit-log' && <AuditLogTab />}
-      </div>
-    </div>
-  );
+			{/* Tabs */}
+			<div className='grid grid-cols-4 gap-1 mb-6'>
+				{TABS.map((tab) => {
+					const Icon = tab.icon;
+					const isActive = activeTab === tab.key;
+
+					return (
+						<button key={tab.key} onClick={() => setActiveTab(tab.key)} className={`flex flex-col items-center gap-1 px-1 py-2.5 rounded-md border transition-colors text-[10px] sm:text-[11px] font-medium overflow-hidden ${isActive ? "bg-accent/10 border-accent/30 text-accent" : "border-border text-muted hover:text-cream hover:border-border-light"}`}>
+							<Icon size={16} />
+							<span className='truncate w-full text-center leading-tight'>{tab.label}</span>
+						</button>
+					);
+				})}
+			</div>
+
+			{/* Tab content */}
+			<div className='game-panel p-4'>
+				{activeTab === "users" && <UsersTab />}
+				{activeTab === "api-keys" && <ApiKeysTab />}
+				{activeTab === "invite-codes" && <InviteCodesTab />}
+				{activeTab === "audit-log" && <AuditLogTab />}
+			</div>
+		</div>
+	);
 }

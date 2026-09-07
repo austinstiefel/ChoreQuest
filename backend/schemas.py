@@ -7,7 +7,7 @@ from backend.models import UserRole, Difficulty, Recurrence, AssignmentStatus, R
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=2, max_length=50)
     password: str = Field(min_length=6)
-    display_name: str = Field(min_length=1, max_length=10)
+    display_name: str = Field(min_length=1, max_length=30)
     role: UserRole = UserRole.kid
     invite_code: str | None = None
 
@@ -414,6 +414,11 @@ class AdminUserUpdate(BaseModel):
     role: UserRole | None = None
     is_active: bool | None = None
 
+class AdminUserCreate(BaseModel):
+    username: str = Field(min_length=2, max_length=50)
+    password: str = Field(min_length=6)
+    display_name: str = Field(min_length=1, max_length=30)
+    role: UserRole = UserRole.kid
 
 class AdminResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=6)

@@ -19,6 +19,7 @@ from backend.websocket_manager import ws_manager
 from backend.models import RefreshToken, User, UserRole
 from backend.services.assignment_generator import generate_daily_assignments
 from backend.services.push_hook import install_push_hooks
+from backend.bootstrap import bootstrap_initial_admin
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +116,11 @@ async def daily_reset_task():
 async def lifespan(app: FastAPI):
     await init_db()
     install_push_hooks()
+
     async with async_session() as db:
+        await bootstrap_initial_admin(db)
         await seed_database(db)
+
     task = asyncio.create_task(daily_reset_task())
     yield
     task.cancel()

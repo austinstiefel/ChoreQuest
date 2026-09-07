@@ -7,10 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db
-from backend.models import User, UserRole, RefreshToken, InviteCode, AuditLog
+from backend.models import User, UserRole, RefreshToken, AuditLog, AppSetting
 from backend.seed import seed_database
 from backend.schemas import (
-    RegisterRequest,
     LoginRequest,
     PinLoginRequest,
     ChangePasswordRequest,
@@ -36,6 +35,7 @@ from backend.websocket_manager import ws_manager
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 REFRESH_COOKIE_NAME = "refresh_token"
+SETUP_COMPLETE_KEY = "initial_setup_complete"
 
 
 def _set_refresh_cookie(response: Response, token: str):
@@ -81,81 +81,40 @@ async def _issue_tokens(
         user=UserResponse.model_validate(user),
     )
 
-
-# ---------- POST /register ----------
-@router.post("/register", response_model=AuthResponse)
-async def register(
-    body: RegisterRequest,
-    request: Request,
-    response: Response,
+# ---------- GET /setup-status ----------
+@router.get("/setup-status")
+async def get_setup_status(
     db: AsyncSession = Depends(get_db),
 ):
-    rate_limiter.check(f"register:{request.client.host}", 5, 3600)
+    """Return whether the initial administrator setup has been completed."""
 
-    # Check if this is the very first user
-    count_result = await db.execute(select(func.count()).select_from(User))
-    user_count = count_result.scalar()
-    is_first_user = user_count == 0
-
-    # Determine role
-    if is_first_user:
-        role = UserRole.admin
-    else:
-        role = body.role
-
-    # Check invite code requirement for non-first users
-    if not is_first_user and not settings.REGISTRATION_ENABLED:
-        if not body.invite_code:
-            raise HTTPException(
-                status_code=400,
-                detail="Invite code required when registration is not open",
-            )
-        result = await db.execute(
-            select(InviteCode).where(InviteCode.code == body.invite_code)
+    result = await db.execute(
+        select(User)
+        .where(
+            User.role == UserRole.admin,
+            User.is_active == True,
         )
-        invite = result.scalar_one_or_none()
-        if invite is None:
-            raise HTTPException(status_code=400, detail="Invalid invite code")
-        if invite.expires_at and invite.expires_at < datetime.now(timezone.utc):
-            raise HTTPException(status_code=400, detail="Invite code has expired")
-        if invite.times_used >= invite.max_uses:
-            raise HTTPException(status_code=400, detail="Invite code has been fully used")
-        # Use the invite code's role if the user is not the first
-        role = invite.role
-        invite.times_used += 1
-
-    # Check duplicate username
-    result = await db.execute(select(User).where(User.username == body.username))
-    if result.scalar_one_or_none() is not None:
-        raise HTTPException(status_code=409, detail="Username already taken")
-
-    user = User(
-        username=body.username,
-        display_name=body.display_name,
-        password_hash=hash_password(body.password),
-        role=role,
+        .order_by(User.id)
     )
-    db.add(user)
-    await db.flush()
+    admin = result.scalars().first()
 
-    # Audit log
-    audit = AuditLog(
-        user_id=user.id,
-        action="register",
-        details={"role": role.value, "first_user": is_first_user},
-        ip_address=request.client.host if request.client else None,
+    if admin is None:
+        return {
+            "setup_required": True,
+            "admin_username": None,
+        }
+
+    setting_result = await db.execute(
+        select(AppSetting).where(AppSetting.key == SETUP_COMPLETE_KEY)
     )
-    db.add(audit)
-    await db.commit()
-    await db.refresh(user)
+    setting = setting_result.scalar_one_or_none()
 
-    # First user (admin) was created after startup seed ran with no creator —
-    # re-seed now so default quests and templates are populated.
-    if is_first_user:
-        await seed_database(db)
+    setup_complete = setting is not None and setting.value == "true"
 
-    return await _issue_tokens(user, db, response)
-
+    return {
+        "setup_required": not setup_complete,
+        "admin_username": admin.username,
+    }
 
 # ---------- POST /login ----------
 @router.post("/login", response_model=AuthResponse)
@@ -184,6 +143,18 @@ async def login(
         ip_address=request.client.host if request.client else None,
     )
     db.add(audit)
+
+    # Mark the initial administrator setup as complete after
+    # the first successful administrator login.
+    if user.role == UserRole.admin:
+        setting_result = await db.execute(
+            select(AppSetting).where(AppSetting.key == SETUP_COMPLETE_KEY)
+        )
+        setting = setting_result.scalar_one_or_none()
+
+        if setting is not None and setting.value == "false":
+            setting.value = "true"
+
     await db.commit()
 
     return await _issue_tokens(user, db, response)

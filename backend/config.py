@@ -7,6 +7,9 @@ WEAK_SECRETS = {"changeme", "secret", "password", "12345678", "1234567890123456"
 class Settings(BaseSettings):
     SECRET_KEY: str
     REGISTRATION_ENABLED: bool = False
+    INITIAL_ADMIN_USERNAME: str = ""
+    INITIAL_ADMIN_PASSWORD: str = ""
+    INITIAL_ADMIN_DISPLAY_NAME: str = ""
     DATABASE_URL: str = "sqlite+aiosqlite:////app/data/chores_os.db"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
