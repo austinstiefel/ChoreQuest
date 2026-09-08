@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -11,6 +11,7 @@ from backend.models import User, UserRole, RefreshToken, AuditLog, AppSetting
 from backend.seed import seed_database
 from backend.schemas import (
     LoginRequest,
+    InitialPasswordSetupRequest,
     PinLoginRequest,
     ChangePasswordRequest,
     SetPinRequest,
@@ -36,6 +37,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 REFRESH_COOKIE_NAME = "refresh_token"
 SETUP_COMPLETE_KEY = "initial_setup_complete"
+INITIAL_PASSWORD_SETUP_REQUIRED_KEY = "initial_password_setup_required"
 
 
 def _set_refresh_cookie(response: Response, token: str):
@@ -102,6 +104,7 @@ async def get_setup_status(
         return {
             "setup_required": True,
             "admin_username": None,
+            "password_setup_required": False,
         }
 
     setting_result = await db.execute(
@@ -109,12 +112,109 @@ async def get_setup_status(
     )
     setting = setting_result.scalar_one_or_none()
 
+    password_setup_result = await db.execute(
+        select(AppSetting).where(
+            AppSetting.key == INITIAL_PASSWORD_SETUP_REQUIRED_KEY
+        )
+    )
+    password_setup_setting = password_setup_result.scalar_one_or_none()
+
     setup_complete = setting is not None and setting.value == "true"
+    password_setup_required = (
+        not setup_complete
+        and password_setup_setting is not None
+        and password_setup_setting.value == "true"
+    )
 
     return {
         "setup_required": not setup_complete,
         "admin_username": admin.username,
+        "password_setup_required": password_setup_required,
     }
+
+
+# ---------- POST /setup-password ----------
+@router.post("/setup-password", response_model=AuthResponse)
+async def setup_initial_password(
+    body: InitialPasswordSetupRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the password for the password-less bootstrap administrator once."""
+
+    rate_limiter.check(f"setup-password:{request.client.host}", 5, 900)
+
+    if body.password != body.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    setup_result = await db.execute(
+        select(AppSetting).where(AppSetting.key == SETUP_COMPLETE_KEY)
+    )
+    setup_setting = setup_result.scalar_one_or_none()
+    password_setup_result = await db.execute(
+        select(AppSetting).where(
+            AppSetting.key == INITIAL_PASSWORD_SETUP_REQUIRED_KEY
+        )
+    )
+    password_setup_setting = password_setup_result.scalar_one_or_none()
+
+    if (
+        setup_setting is None
+        or setup_setting.value != "false"
+        or password_setup_setting is None
+        or password_setup_setting.value != "true"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Initial password setup is not available",
+        )
+
+    admin_result = await db.execute(
+        select(User)
+        .where(User.role == UserRole.admin, User.is_active == True)
+        .order_by(User.id)
+    )
+    admins = admin_result.scalars().all()
+    if len(admins) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Initial administrator setup is not available",
+        )
+
+    admin = admins[0]
+    admin.password_hash = hash_password(body.password)
+    admin.updated_at = datetime.now(timezone.utc)
+
+    # The conditional update makes the one-time transition safe if two setup
+    # requests arrive concurrently.
+    transition = await db.execute(
+        update(AppSetting)
+        .where(
+            AppSetting.key == SETUP_COMPLETE_KEY,
+            AppSetting.value == "false",
+        )
+        .values(value="true")
+    )
+    if transition.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="Initial password setup is no longer available",
+        )
+
+    password_setup_setting.value = "false"
+    db.add(
+        AuditLog(
+            user_id=admin.id,
+            action="initial_password_setup",
+            details={},
+            ip_address=request.client.host if request.client else None,
+        )
+    )
+    await db.commit()
+
+    return await _issue_tokens(admin, db, response)
 
 # ---------- POST /login ----------
 @router.post("/login", response_model=AuthResponse)

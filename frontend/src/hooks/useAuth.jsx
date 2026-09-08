@@ -63,6 +63,16 @@ export function AuthProvider({ children }) {
     return data.user;
   };
 
+  const setupPassword = async (password, confirmPassword) => {
+    const data = await api('/api/auth/setup-password', {
+      method: 'POST',
+      body: { password, confirm_password: confirmPassword },
+    });
+    setAccessToken(data.access_token);
+    setUser(data.user);
+    return data.user;
+  };
+
   const pinLogin = async (username, pin) => {
     const data = await api('/api/auth/pin-login', { method: 'POST', body: { username, pin } });
     setAccessToken(data.access_token);
@@ -92,7 +102,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, pinLogin, register, logout, updateUser, refreshSession }}>
+    <AuthContext.Provider value={{ user, loading, login, setupPassword, pinLogin, register, logout, updateUser, refreshSession }}>
       {children}
     </AuthContext.Provider>
   );

@@ -17,6 +17,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class InitialPasswordSetupRequest(BaseModel):
+    password: str = Field(min_length=6)
+    confirm_password: str = Field(min_length=6)
+
+
 class PinLoginRequest(BaseModel):
     username: str
     pin: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
@@ -116,7 +121,7 @@ class ChoreResponse(BaseModel):
     custom_days: list[int] | None
     requires_photo: bool
     is_active: bool
-    created_by: int
+    created_by: int | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -170,7 +175,7 @@ class RewardResponse(BaseModel):
     stock: int | None
     auto_approve_threshold: int | None
     is_active: bool
-    created_by: int
+    created_by: int | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -328,7 +333,7 @@ class EventResponse(BaseModel):
     start_date: datetime
     end_date: datetime
     is_active: bool
-    created_by: int
+    created_by: int | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -483,9 +488,9 @@ class ShoutoutCreate(BaseModel):
 
 class ShoutoutResponse(BaseModel):
     id: int
-    from_user_id: int
+    from_user_id: int | None
     from_user_name: str | None = None
-    to_user_id: int
+    to_user_id: int | None
     to_user_name: str | None = None
     message: str
     emoji: str
@@ -504,7 +509,7 @@ class VacationResponse(BaseModel):
     id: int
     start_date: date
     end_date: date
-    created_by: int
+    created_by: int | None
     is_active: bool
     created_at: datetime
 
@@ -525,7 +530,7 @@ class AnnouncementResponse(BaseModel):
     message: str
     icon: str | None
     is_pinned: bool
-    created_by: int
+    created_by: int | None
     creator_name: str | None = None
     created_at: datetime
 

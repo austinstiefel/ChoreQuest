@@ -5,17 +5,19 @@ import { Swords } from "lucide-react";
 import { api } from "../api/client";
 
 export default function Login() {
-	const { login, pinLogin } = useAuth();
+	const { login, setupPassword, pinLogin } = useAuth();
 	const navigate = useNavigate();
 
 	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
+	const [confirmPassword, setConfirmPassword] = useState("");
 	const [pin, setPin] = useState(["", "", "", "", "", ""]);
 	const [usePinMode, setUsePinMode] = useState(false);
 	const [error, setError] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [setupRequired, setSetupRequired] = useState(false);
 	const [setupAdminUsername, setSetupAdminUsername] = useState("");
+	const [passwordSetupRequired, setPasswordSetupRequired] = useState(false);
 	const [setupLoading, setSetupLoading] = useState(true);
 
 	const pinRefs = useRef([]);
@@ -26,6 +28,7 @@ export default function Login() {
 				const status = await api("/api/auth/setup-status");
 
 				setSetupRequired(status.setup_required);
+				setPasswordSetupRequired(status.password_setup_required === true);
 
 				if (status.setup_required) {
 					setSetupAdminUsername(status.admin_username || "");
@@ -87,13 +90,27 @@ export default function Login() {
 		setError("");
 
 		const loginUsername = setupRequired ? setupAdminUsername : username.trim();
+		const isPasswordSetup = setupRequired && passwordSetupRequired;
 
-		if (!loginUsername) {
+		if (!isPasswordSetup && !loginUsername) {
 			setError("Username is required");
 			return;
 		}
 
-		if (usePinMode) {
+		if (isPasswordSetup) {
+			if (!password) {
+				setError("Password is required");
+				return;
+			}
+			if (password.length < 6) {
+				setError("Password must be at least 6 characters");
+				return;
+			}
+			if (password !== confirmPassword) {
+				setError("Passwords do not match");
+				return;
+			}
+		} else if (usePinMode) {
 			const pinStr = pin.join("");
 			if (pinStr.length !== 6) {
 				setError("Enter all 6 PIN digits");
@@ -106,7 +123,9 @@ export default function Login() {
 
 		setSubmitting(true);
 		try {
-			if (usePinMode) {
+			if (isPasswordSetup) {
+				await setupPassword(password, confirmPassword);
+			} else if (usePinMode) {
 				await pinLogin(username.trim(), pin.join(""));
 			} else {
 				await login(loginUsername, password);
@@ -141,7 +160,7 @@ export default function Login() {
 				{setupRequired && (
 					<div className='mb-5'>
 						<h2 className='text-cream text-lg font-semibold mb-1'>Welcome, {setupAdminUsername}!</h2>
-						<p className='text-muted text-sm'>Please login to begin first time setup.</p>
+						<p className='text-muted text-sm'>{passwordSetupRequired ? "Create your administrator password to begin first time setup." : "Please login to begin first time setup."}</p>
 					</div>
 				)}
 
@@ -178,8 +197,14 @@ export default function Login() {
 				{/* Password */}
 				{!usePinMode && (
 					<div className='mb-5'>
-						<label className='block text-cream text-sm font-medium mb-1'>Password</label>
-						<input type='password' value={password} onChange={(e) => setPassword(e.target.value)} placeholder='Enter your password' autoComplete='current-password' className='field-input' />
+						<label className='block text-cream text-sm font-medium mb-1'>{passwordSetupRequired ? "Create Password" : "Password"}</label>
+						<input type='password' value={password} onChange={(e) => setPassword(e.target.value)} placeholder={passwordSetupRequired ? "Create your password" : "Enter your password"} autoComplete={passwordSetupRequired ? "new-password" : "current-password"} className='field-input' />
+						{passwordSetupRequired && (
+							<div className='mt-3'>
+								<label className='block text-cream text-sm font-medium mb-1'>Confirm Password</label>
+								<input type='password' value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder='Confirm your password' autoComplete='new-password' className='field-input' />
+							</div>
+						)}
 					</div>
 				)}
 
@@ -197,7 +222,7 @@ export default function Login() {
 
 				{/* Submit */}
 				<button type='submit' disabled={submitting} className={`game-btn game-btn-blue w-full text-sm ${submitting ? "opacity-60 cursor-wait" : ""}`}>
-					{submitting ? "Signing in..." : "Sign in"}
+					{submitting ? (passwordSetupRequired ? "Creating password..." : "Signing in...") : (passwordSetupRequired ? "Create Password" : "Sign in")}
 				</button>
 			</form>
 		</div>

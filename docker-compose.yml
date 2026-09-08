@@ -8,6 +8,9 @@ services:
             - SECRET_KEY=${SECRET_KEY}
             - TZ=${TZ}
             - COOKIE_SECURE=true
+            - INITIAL_ADMIN_USERNAME=${INITIAL_ADMIN_USERNAME}
+            - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD}
+            - INITIAL_ADMIN_DISPLAY_NAME=${INITIAL_ADMIN_DISPLAY_NAME}
 
         volumes:
             - ./data:/app/data

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
 import Modal from "../components/Modal";
-import { Shield, Users, Key, Ticket, ScrollText, Plus, Trash2, Copy, Check, ChevronLeft, ChevronRight, ArrowLeft, Loader2, Eye, EyeOff, RotateCcw } from "lucide-react";
+import { Shield, Users, Key, Ticket, ScrollText, Plus, Trash2, Copy, Check, ChevronLeft, ChevronRight, ArrowLeft, Loader2, RotateCcw } from "lucide-react";
 
 const TABS = [
 	{ key: "users", label: "Users", icon: Users },
@@ -14,6 +14,7 @@ const TABS = [
 
 // ─── Users Tab ───────────────────────────────────────────────────────
 function UsersTab() {
+	const { user: currentUser } = useAuth();
 	const [users, setUsers] = useState([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
@@ -23,6 +24,11 @@ function UsersTab() {
 	const [resetPasswordUser, setResetPasswordUser] = useState(null);
 	const [showDeleteUser, setShowDeleteUser] = useState(false);
 	const [deleteUserTarget, setDeleteUserTarget] = useState(null);
+	const [deleteUserError, setDeleteUserError] = useState("");
+	const [deleteUserSubmitting, setDeleteUserSubmitting] = useState(false);
+	const [roleChangeTarget, setRoleChangeTarget] = useState(null);
+	const [roleChangeError, setRoleChangeError] = useState("");
+	const [roleChangeSubmitting, setRoleChangeSubmitting] = useState(false);
 	const [newUser, setNewUser] = useState({
 		username: "",
 		display_name: "",
@@ -50,15 +56,34 @@ function UsersTab() {
 		fetchUsers();
 	}, [fetchUsers]);
 
-	const updateRole = async (userId, newRole) => {
+	const openRoleChange = (usr, newRole) => {
+		if (newRole === usr.role) return;
+		setRoleChangeTarget({ user: usr, newRole });
+		setRoleChangeError("");
+	};
+
+	const closeRoleChange = () => {
+		if (roleChangeSubmitting) return;
+		setRoleChangeTarget(null);
+		setRoleChangeError("");
+	};
+
+	const submitRoleChange = async () => {
+		if (!roleChangeTarget) return;
+
+		setRoleChangeError("");
+		setRoleChangeSubmitting(true);
 		try {
-			await api(`/api/admin/users/${userId}`, {
+			await api(`/api/admin/users/${roleChangeTarget.user.id}`, {
 				method: "PUT",
-				body: { role: newRole },
+				body: { role: roleChangeTarget.newRole },
 			});
-			setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
+			setUsers((prev) => prev.map((u) => (u.id === roleChangeTarget.user.id ? { ...u, role: roleChangeTarget.newRole } : u)));
+			setRoleChangeTarget(null);
 		} catch (err) {
-			setError(err.message || "Failed to update role");
+			setRoleChangeError(err.message || "Failed to update role");
+		} finally {
+			setRoleChangeSubmitting(false);
 		}
 	};
 
@@ -169,8 +194,33 @@ function UsersTab() {
 	};
 
 	const openDeleteUser = (usr) => {
+		setDeleteUserError("");
 		setDeleteUserTarget(usr);
 		setShowDeleteUser(true);
+	};
+
+	const closeDeleteUser = () => {
+		if (deleteUserSubmitting) return;
+		setShowDeleteUser(false);
+		setDeleteUserTarget(null);
+		setDeleteUserError("");
+	};
+
+	const submitDeleteUser = async () => {
+		if (!deleteUserTarget) return;
+
+		setDeleteUserError("");
+		setDeleteUserSubmitting(true);
+		try {
+			await api(`/api/admin/users/${deleteUserTarget.id}`, { method: "DELETE" });
+			setUsers((prev) => prev.filter((u) => u.id !== deleteUserTarget.id));
+			setShowDeleteUser(false);
+			setDeleteUserTarget(null);
+		} catch (err) {
+			setDeleteUserError(err.message || "Failed to delete user");
+		} finally {
+			setDeleteUserSubmitting(false);
+		}
 	};
 
 	if (loading) {
@@ -181,7 +231,7 @@ function UsersTab() {
 		);
 	}
 
-	const activeAdminCount = users.filter((u) => u.role === "admin" && u.is_active !== false).length;
+	const adminCount = users.filter((u) => u.role === "admin").length;
 
 	return (
 		<div>
@@ -204,7 +254,10 @@ function UsersTab() {
 			) : (
 				<div className='space-y-3'>
 					{users.map((usr) => {
-						const isOnlyActiveAdmin = usr.role === "admin" && usr.is_active !== false && activeAdminCount === 1;
+						const isOnlyAdmin = usr.role === "admin" && adminCount === 1;
+						const isSelf = usr.id === currentUser?.id;
+						const deleteDisabled = isOnlyAdmin || isSelf;
+						const deleteDisabledReason = isSelf ? "You cannot delete your own account!" : isOnlyAdmin ? "You cannot delete the only admin account!" : undefined;
 
 						return (
 							<div key={usr.id} className='p-3 rounded-md bg-surface-raised/30 border border-border space-y-2'>
@@ -213,14 +266,12 @@ function UsersTab() {
 										<p className='text-cream text-sm font-medium truncate'>{usr.username}</p>
 										{usr.display_name && <p className='text-muted text-xs truncate'>{usr.display_name}</p>}
 									</div>
-
-									<span className={`inline-block px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${usr.is_active !== false ? "bg-emerald/10 text-emerald border border-emerald/30" : "bg-crimson/10 text-crimson border border-crimson/30"}`}>{usr.is_active !== false ? "Active" : "Inactive"}</span>
 								</div>
 
 								<div className='flex items-center gap-2'>
 									{/* Role selector */}
-									<div className='flex-1' title={isOnlyActiveAdmin ? "You cannot change the role of the only admin account!" : undefined}>
-										<select value={usr.role} onChange={(e) => updateRole(usr.id, e.target.value)} disabled={isOnlyActiveAdmin} className={`field-input !py-1.5 !text-xs w-full ${isOnlyActiveAdmin ? "opacity-40 cursor-not-allowed" : ""}`}>
+									<div className='flex-1' title={isOnlyAdmin ? "You cannot change the role of the only admin account!" : undefined}>
+										<select value={usr.role} onChange={(e) => openRoleChange(usr, e.target.value)} disabled={isOnlyAdmin} className={`field-input !py-1.5 !text-xs w-full ${isOnlyAdmin ? "opacity-40 cursor-not-allowed" : ""}`}>
 											<option value='kid'>kid</option>
 											<option value='parent'>parent</option>
 											<option value='admin'>admin</option>
@@ -233,9 +284,9 @@ function UsersTab() {
 										Password
 									</button>
 
-									{/* Activate / Deactivate */}
-									<div title={isOnlyActiveAdmin ? "You cannot delete the only admin account!" : undefined}>
-										<button onClick={() => openDeleteUser(usr)} disabled={isOnlyActiveAdmin} className={`game-btn game-btn-red !py-1.5 !px-3 !text-[10px] flex-shrink-0 ${isOnlyActiveAdmin ? "opacity-40 cursor-not-allowed" : ""}`}>
+									{/* Permanent deletion */}
+									<div title={deleteDisabledReason}>
+										<button onClick={() => openDeleteUser(usr)} disabled={deleteDisabled} className={`game-btn game-btn-red !py-1.5 !px-3 !text-[10px] flex-shrink-0 ${deleteDisabled ? "opacity-40 cursor-not-allowed" : ""}`}>
 											<Trash2 size={12} className='inline mr-1' />
 											Delete User
 										</button>
@@ -390,6 +441,61 @@ function UsersTab() {
 
 						{resetPasswordError && <div className='mt-1.5 p-2 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-xs'>{resetPasswordError}</div>}
 					</div>
+				</div>
+			</Modal>
+
+			{/* Role change confirmation modal */}
+			<Modal
+				isOpen={!!roleChangeTarget}
+				onClose={closeRoleChange}
+				title='Confirm Role Change'
+				actions={[
+					{
+						label: "Cancel",
+						onClick: closeRoleChange,
+						className: "game-btn game-btn-red",
+						disabled: roleChangeSubmitting,
+					},
+					{
+						label: roleChangeSubmitting ? "Saving..." : "Confirm",
+						onClick: submitRoleChange,
+						className: "game-btn game-btn-blue",
+						disabled: roleChangeSubmitting,
+					},
+				]}>
+				<div className='space-y-3'>
+					<p className='text-muted'>
+						Change <span className='text-cream font-medium'>{roleChangeTarget?.user.display_name || roleChangeTarget?.user.username}</span>'s role to <span className='text-accent font-medium capitalize'>{roleChangeTarget?.newRole}</span>?
+					</p>
+					{roleChangeError && <div className='p-2.5 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-sm'>{roleChangeError}</div>}
+				</div>
+			</Modal>
+
+			{/* Permanent user deletion confirmation modal */}
+			<Modal
+				isOpen={showDeleteUser}
+				onClose={closeDeleteUser}
+				title='Delete User'
+				actions={[
+					{
+						label: "Cancel",
+						onClick: closeDeleteUser,
+						className: "game-btn game-btn-blue",
+						disabled: deleteUserSubmitting,
+					},
+					{
+						label: deleteUserSubmitting ? "Deleting..." : "Delete User",
+						onClick: submitDeleteUser,
+						className: "game-btn game-btn-red",
+						disabled: deleteUserSubmitting,
+					},
+				]}>
+				<div className='space-y-3'>
+					<p className='text-muted'>
+						Permanently delete <span className='text-cream font-medium'>{deleteUserTarget?.display_name || deleteUserTarget?.username}</span> ({deleteUserTarget?.username})?
+					</p>
+					<p className='text-crimson text-sm font-medium'>This permanently deletes the account and its user-owned data. This cannot be undone.</p>
+					{deleteUserError && <div className='p-2.5 rounded-md border border-crimson/30 bg-crimson/10 text-crimson text-sm'>{deleteUserError}</div>}
 				</div>
 			</Modal>
 		</div>

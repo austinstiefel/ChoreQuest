@@ -5,11 +5,36 @@ import string
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models import User, UserRole, ApiKey, InviteCode, AuditLog, AppSetting
+from backend.models import (
+    ApiKey,
+    Announcement,
+    AuditLog,
+    Chore,
+    ChoreAssignment,
+    ChoreAssignmentRule,
+    ChoreExclusion,
+    ChoreRotation,
+    InviteCode,
+    Notification,
+    PointTransaction,
+    PushSubscription,
+    RefreshToken,
+    Reward,
+    RewardRedemption,
+    SeasonalEvent,
+    Shoutout,
+    SpinResult,
+    User,
+    UserAchievement,
+    UserAvatarItem,
+    UserRole,
+    VacationPeriod,
+    WishlistItem,
+)
 from backend.schemas import (
     UserResponse,
     AdminUserUpdate,
@@ -27,19 +52,18 @@ from backend.dependencies import require_admin, require_parent, get_current_user
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-async def _is_last_active_admin(
+async def _is_last_admin(
     user: User,
     db: AsyncSession,
 ) -> bool:
-    """Return True if this user is the only active administrator."""
+    """Return True if this user is the only administrator, regardless of status."""
 
-    if user.role != UserRole.admin or not user.is_active:
+    if user.role != UserRole.admin:
         return False
 
     result = await db.execute(
         select(func.count(User.id)).where(
             User.role == UserRole.admin,
-            User.is_active == True,
         )
     )
 
@@ -101,17 +125,17 @@ async def update_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if await _is_last_active_admin(user, db):
+    if await _is_last_admin(user, db):
         if body.role is not None and body.role != UserRole.admin:
             raise HTTPException(
                 status_code=400,
-                detail="Cannot change the role of the only active administrator",
+                detail="Cannot change the role of the only administrator",
             )
 
         if body.is_active is False:
             raise HTTPException(
                 status_code=400,
-                detail="Cannot deactivate the only active administrator",
+                detail="Cannot deactivate the only administrator",
             )
 
     if body.role is not None:
@@ -128,27 +152,118 @@ async def update_user(
 
 # ---------- DELETE /users/{id} ----------
 @router.delete("/users/{user_id}")
-async def deactivate_user(
+async def delete_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
-    """Deactivate a user (set is_active=false)."""
+    """Permanently delete a user and their user-owned records."""
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if await _is_last_active_admin(user, db):
+    if user_id == admin.id:
         raise HTTPException(
             status_code=400,
-            detail="Cannot deactivate the only active administrator",
+            detail="Administrators cannot delete their own account",
         )
 
-    user.is_active = False
-    user.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-    return {"detail": "User deactivated"}
+    if await _is_last_admin(user, db):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the final administrator",
+        )
+
+    try:
+        # Preserve historical actor/audit records while removing the deleted
+        # user's references from them.
+        await db.execute(
+            update(ChoreAssignment)
+            .where(ChoreAssignment.verified_by == user_id)
+            .values(verified_by=None)
+        )
+        await db.execute(
+            update(RewardRedemption)
+            .where(RewardRedemption.approved_by == user_id)
+            .values(approved_by=None)
+        )
+        await db.execute(
+            update(RewardRedemption)
+            .where(RewardRedemption.fulfilled_by == user_id)
+            .values(fulfilled_by=None)
+        )
+        await db.execute(
+            update(PointTransaction)
+            .where(PointTransaction.created_by == user_id)
+            .values(created_by=None)
+        )
+        await db.execute(
+            update(AuditLog)
+            .where(AuditLog.user_id == user_id)
+            .values(user_id=None)
+        )
+
+        # Keep family-wide/application records, but remove the creator link.
+        for model in (
+            Chore,
+            Reward,
+            SeasonalEvent,
+            ApiKey,
+            InviteCode,
+            Announcement,
+            VacationPeriod,
+        ):
+            await db.execute(
+                update(model)
+                .where(model.created_by == user_id)
+                .values(created_by=None)
+            )
+
+        # Shoutouts are historical records and can survive when either actor
+        # is removed.  Handle both user references independently.
+        await db.execute(
+            update(Shoutout)
+            .where(Shoutout.from_user_id == user_id)
+            .values(from_user_id=None)
+        )
+        await db.execute(
+            update(Shoutout)
+            .where(Shoutout.to_user_id == user_id)
+            .values(to_user_id=None)
+        )
+
+        # Rotations are family-wide objects, but their JSON kid list should
+        # not retain a deleted user's ID.
+        rotations = (await db.execute(select(ChoreRotation))).scalars().all()
+        for rotation in rotations:
+            if rotation.kid_ids and user_id in rotation.kid_ids:
+                rotation.kid_ids = [kid_id for kid_id in rotation.kid_ids if kid_id != user_id]
+
+        # Delete records owned specifically by this user.
+        for model in (
+            RefreshToken,
+            ChoreAssignment,
+            ChoreExclusion,
+            ChoreAssignmentRule,
+            RewardRedemption,
+            PointTransaction,
+            UserAchievement,
+            WishlistItem,
+            Notification,
+            SpinResult,
+            PushSubscription,
+            UserAvatarItem,
+        ):
+            await db.execute(delete(model).where(model.user_id == user_id))
+
+        await db.delete(user)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return {"detail": "User permanently deleted"}
 
 
 # ---------- POST /users/{id}/reset-password ----------
