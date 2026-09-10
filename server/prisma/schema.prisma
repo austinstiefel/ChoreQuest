@@ -1,0 +1,404 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model achievements {
+  id                Int                 @id @default(autoincrement())
+  key               String              @unique
+  title             String
+  description       String
+  icon              String
+  points_reward     Int
+  criteria          Unsupported("json")
+  tier              String?
+  group_key         String?
+  sort_order        Int
+  created_at        DateTime
+  user_achievements user_achievements[]
+}
+
+model announcements {
+  id         Int      @id @default(autoincrement())
+  title      String
+  message    String
+  icon       String?
+  is_pinned  Boolean
+  created_by Int?
+  created_at DateTime
+  users      users?   @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model api_keys {
+  id           Int                 @id @default(autoincrement())
+  name         String
+  key_hash     String
+  key_prefix   String
+  scopes       Unsupported("json")
+  created_by   Int?
+  last_used_at DateTime?
+  is_active    Boolean
+  created_at   DateTime
+  users        users?              @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model app_settings {
+  key        String   @id
+  value      String
+  updated_at DateTime
+}
+
+model audit_logs {
+  id         Int                  @id @default(autoincrement())
+  user_id    Int?
+  action     String
+  details    Unsupported("json")?
+  ip_address String?
+  created_at DateTime
+  users      users?               @relation(fields: [user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model avatar_items {
+  id                Int                 @id @default(autoincrement())
+  category          String
+  item_id           String
+  display_name      String
+  rarity            String
+  unlock_method     String
+  unlock_value      Int?
+  is_default        Boolean
+  created_at        DateTime
+  user_avatar_items user_avatar_items[]
+
+  @@unique([category, item_id])
+}
+
+model chore_assignment_rules {
+  id             Int                  @id @default(autoincrement())
+  chore_id       Int
+  user_id        Int
+  recurrence     String
+  custom_days    Unsupported("json")?
+  requires_photo Boolean
+  is_active      Boolean
+  created_at     DateTime
+  updated_at     DateTime
+  users          users                @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  chores         chores               @relation(fields: [chore_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([chore_id, user_id])
+}
+
+model chore_assignments {
+  id                                         Int       @id @default(autoincrement())
+  chore_id                                   Int
+  user_id                                    Int
+  date                                       DateTime
+  status                                     String
+  completed_at                               DateTime?
+  verified_at                                DateTime?
+  verified_by                                Int?
+  photo_proof_path                           String?
+  feedback                                   String?
+  created_at                                 DateTime
+  updated_at                                 DateTime
+  users_chore_assignments_verified_byTousers users?    @relation("chore_assignments_verified_byTousers", fields: [verified_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  users_chore_assignments_user_idTousers     users     @relation("chore_assignments_user_idTousers", fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  chores                                     chores    @relation(fields: [chore_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([chore_id, user_id, date])
+}
+
+model chore_categories {
+  id         Int      @id @default(autoincrement())
+  name       String
+  icon       String
+  colour     String
+  is_default Boolean
+  created_at DateTime
+  chores     chores[]
+}
+
+model chore_exclusions {
+  id         Int      @id @default(autoincrement())
+  chore_id   Int
+  user_id    Int
+  date       DateTime
+  created_at DateTime
+  users      users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  chores     chores   @relation(fields: [chore_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([chore_id, user_id, date])
+}
+
+model chore_rotations {
+  id            Int                 @id @default(autoincrement())
+  chore_id      Int
+  kid_ids       Unsupported("json")
+  cadence       String
+  current_index Int
+  last_rotated  DateTime?
+  created_at    DateTime
+  updated_at    DateTime
+  chores        chores              @relation(fields: [chore_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model chores {
+  id                     Int                      @id @default(autoincrement())
+  title                  String
+  description            String?
+  points                 Int
+  difficulty             String
+  icon                   String?
+  category_id            Int
+  recurrence             String
+  custom_days            Unsupported("json")?
+  requires_photo         Boolean
+  is_active              Boolean
+  created_by             Int?
+  created_at             DateTime
+  updated_at             DateTime
+  chore_assignment_rules chore_assignment_rules[]
+  chore_assignments      chore_assignments[]
+  chore_exclusions       chore_exclusions[]
+  chore_rotations        chore_rotations[]
+  users                  users?                   @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  chore_categories       chore_categories         @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model invite_codes {
+  id         Int       @id @default(autoincrement())
+  code       String    @unique
+  role       String
+  max_uses   Int
+  times_used Int
+  created_by Int?
+  expires_at DateTime?
+  created_at DateTime
+  users      users?    @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model notifications {
+  id             Int      @id @default(autoincrement())
+  user_id        Int
+  type           String
+  title          String
+  message        String
+  is_read        Boolean
+  reference_type String?
+  reference_id   Int?
+  created_at     DateTime
+  users          users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model point_transactions {
+  id                                         Int      @id @default(autoincrement())
+  user_id                                    Int
+  amount                                     Int
+  type                                       String
+  description                                String
+  reference_id                               Int?
+  created_by                                 Int?
+  created_at                                 DateTime
+  users_point_transactions_created_byTousers users?   @relation("point_transactions_created_byTousers", fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  users_point_transactions_user_idTousers    users    @relation("point_transactions_user_idTousers", fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model push_subscriptions {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  endpoint   String
+  p256dh     String
+  auth       String
+  created_at DateTime
+  users      users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([user_id, endpoint])
+}
+
+model quest_templates {
+  id               Int     @id @default(autoincrement())
+  title            String
+  description      String?
+  suggested_points Int
+  difficulty       String
+  category_name    String
+  icon             String?
+}
+
+model refresh_tokens {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  token_hash String
+  is_revoked Boolean
+  expires_at DateTime
+  created_at DateTime
+  users      users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model reward_redemptions {
+  id                                           Int       @id @default(autoincrement())
+  reward_id                                    Int
+  user_id                                      Int
+  points_spent                                 Int
+  status                                       String
+  approved_by                                  Int?
+  approved_at                                  DateTime?
+  fulfilled_by                                 Int?
+  fulfilled_at                                 DateTime?
+  created_at                                   DateTime
+  users_reward_redemptions_fulfilled_byTousers users?    @relation("reward_redemptions_fulfilled_byTousers", fields: [fulfilled_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  users_reward_redemptions_approved_byTousers  users?    @relation("reward_redemptions_approved_byTousers", fields: [approved_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  users_reward_redemptions_user_idTousers      users     @relation("reward_redemptions_user_idTousers", fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rewards                                      rewards   @relation(fields: [reward_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model rewards {
+  id                     Int                  @id @default(autoincrement())
+  title                  String
+  description            String?
+  point_cost             Int
+  icon                   String?
+  category               String?
+  stock                  Int?
+  auto_approve_threshold Int?
+  is_active              Boolean
+  created_by             Int?
+  created_at             DateTime
+  updated_at             DateTime
+  reward_redemptions     reward_redemptions[]
+  users                  users?               @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  wishlist_items         wishlist_items[]
+}
+
+model seasonal_events {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String?
+  multiplier  Float
+  start_date  DateTime
+  end_date    DateTime
+  is_active   Boolean
+  created_by  Int?
+  created_at  DateTime
+  users       users?   @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model shoutouts {
+  id                                  Int      @id @default(autoincrement())
+  from_user_id                        Int?
+  to_user_id                          Int?
+  message                             String
+  emoji                               String
+  created_at                          DateTime
+  users_shoutouts_to_user_idTousers   users?   @relation("shoutouts_to_user_idTousers", fields: [to_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  users_shoutouts_from_user_idTousers users?   @relation("shoutouts_from_user_idTousers", fields: [from_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model spin_results {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  points_won Int
+  spin_date  DateTime
+  created_at DateTime
+  users      users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([user_id, spin_date])
+}
+
+model user_achievements {
+  id             Int          @id @default(autoincrement())
+  user_id        Int
+  achievement_id Int
+  unlocked_at    DateTime
+  achievements   achievements @relation(fields: [achievement_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users          users        @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([user_id, achievement_id])
+}
+
+model user_avatar_items {
+  id             Int          @id @default(autoincrement())
+  user_id        Int
+  avatar_item_id Int
+  acquired_via   String
+  created_at     DateTime
+  avatar_items   avatar_items @relation(fields: [avatar_item_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users          users        @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([user_id, avatar_item_id])
+}
+
+model users {
+  id                                                        Int                      @id @default(autoincrement())
+  username                                                  String                   @unique
+  display_name                                              String
+  password_hash                                             String
+  pin_hash                                                  String?
+  role                                                      String
+  points_balance                                            Int
+  total_points_earned                                       Int
+  current_streak                                            Int
+  longest_streak                                            Int
+  last_streak_date                                          DateTime?
+  streak_freezes_used                                       Int
+  streak_freeze_month                                       Int?
+  avatar_config                                             Unsupported("json")?
+  is_active                                                 Boolean
+  created_at                                                DateTime
+  updated_at                                                DateTime
+  announcements                                             announcements[]
+  api_keys                                                  api_keys[]
+  audit_logs                                                audit_logs[]
+  chore_assignment_rules                                    chore_assignment_rules[]
+  chore_assignments_chore_assignments_verified_byTousers    chore_assignments[]      @relation("chore_assignments_verified_byTousers")
+  chore_assignments_chore_assignments_user_idTousers        chore_assignments[]      @relation("chore_assignments_user_idTousers")
+  chore_exclusions                                          chore_exclusions[]
+  chores                                                    chores[]
+  invite_codes                                              invite_codes[]
+  notifications                                             notifications[]
+  point_transactions_point_transactions_created_byTousers   point_transactions[]     @relation("point_transactions_created_byTousers")
+  point_transactions_point_transactions_user_idTousers      point_transactions[]     @relation("point_transactions_user_idTousers")
+  push_subscriptions                                        push_subscriptions[]
+  refresh_tokens                                            refresh_tokens[]
+  reward_redemptions_reward_redemptions_fulfilled_byTousers reward_redemptions[]     @relation("reward_redemptions_fulfilled_byTousers")
+  reward_redemptions_reward_redemptions_approved_byTousers  reward_redemptions[]     @relation("reward_redemptions_approved_byTousers")
+  reward_redemptions_reward_redemptions_user_idTousers      reward_redemptions[]     @relation("reward_redemptions_user_idTousers")
+  rewards                                                   rewards[]
+  seasonal_events                                           seasonal_events[]
+  shoutouts_shoutouts_to_user_idTousers                     shoutouts[]              @relation("shoutouts_to_user_idTousers")
+  shoutouts_shoutouts_from_user_idTousers                   shoutouts[]              @relation("shoutouts_from_user_idTousers")
+  spin_results                                              spin_results[]
+  user_achievements                                         user_achievements[]
+  user_avatar_items                                         user_avatar_items[]
+  vacation_periods                                          vacation_periods[]
+  wishlist_items                                            wishlist_items[]
+}
+
+model vacation_periods {
+  id         Int      @id @default(autoincrement())
+  start_date DateTime
+  end_date   DateTime
+  created_by Int?
+  is_active  Boolean
+  created_at DateTime
+  users      users?   @relation(fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+}
+
+model wishlist_items {
+  id                     Int      @id @default(autoincrement())
+  user_id                Int
+  title                  String
+  url                    String?
+  image_url              String?
+  notes                  String?
+  converted_to_reward_id Int?
+  created_at             DateTime
+  updated_at             DateTime
+  rewards                rewards? @relation(fields: [converted_to_reward_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                  users    @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
