@@ -1,6 +1,10 @@
 import "dotenv/config";
+import { loadAuthConfig } from "./config/auth.js";
 import { app } from "./app.js";
 import { prisma } from "./db/prisma.js";
+
+// Validate required authentication configuration before accepting requests.
+loadAuthConfig();
 
 const port = Number(process.env.PORT ?? 3000);
 
