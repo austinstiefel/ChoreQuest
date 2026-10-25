@@ -1,10 +1,17 @@
 import "dotenv/config";
 import { loadAuthConfig } from "./config/auth.js";
-import { app } from "./app.js";
+import { createApp } from "./app.js";
 import { prisma } from "./db/prisma.js";
+import { createPrismaAuthRepository, createAuthRouter } from "./routes/auth.js";
 
 // Validate required authentication configuration before accepting requests.
-loadAuthConfig();
+const authConfig = loadAuthConfig();
+const app = createApp(
+	createAuthRouter({
+		config: authConfig,
+		repository: createPrismaAuthRepository(prisma),
+	}),
+);
 
 const port = Number(process.env.PORT ?? 3000);
 
