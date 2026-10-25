@@ -31,6 +31,12 @@ export interface AuthUserRecord {
 	created_at: Date;
 }
 
+export interface RefreshTokenRecord {
+	id: number;
+	user_id: number;
+	is_revoked: boolean;
+}
+
 export interface AuthRepository {
 	findFirstActiveAdmin(): Promise<AuthUserRecord | null>;
 	findActiveAdmins(): Promise<AuthUserRecord[]>;
@@ -52,6 +58,15 @@ export interface AuthRepository {
 		tokenHash: string;
 		expiresAt: Date;
 	}): Promise<void>;
+	findRefreshTokenByHash(tokenHash: string): Promise<RefreshTokenRecord | null>;
+	findActiveUserById(userId: number): Promise<AuthUserRecord | null>;
+	rotateRefreshToken(input: {
+		tokenHash: string;
+		userId: number;
+		replacementTokenHash: string;
+		replacementExpiresAt: Date;
+	}): Promise<"rotated" | "not_found" | "revoked">;
+	revokeRefreshTokenByHash(tokenHash: string): Promise<void>;
 }
 
 export interface AuthRateLimiter {
@@ -217,6 +232,63 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 				},
 			});
 		},
+
+		async findRefreshTokenByHash(tokenHash) {
+			return prisma.refresh_tokens.findFirst({
+				where: { token_hash: tokenHash },
+				select: { id: true, user_id: true, is_revoked: true },
+			});
+		},
+
+		async findActiveUserById(userId) {
+			const rows = await prisma.$queryRaw<RawUserRecord[]>`
+        SELECT id, username, display_name, password_hash, pin_hash, role,
+          points_balance, total_points_earned, current_streak, longest_streak,
+          streak_freezes_used, streak_freeze_month, avatar_config, is_active, created_at
+        FROM users
+        WHERE id = ${userId} AND is_active = ${true}
+        LIMIT 1
+      `;
+			return rows[0] === undefined ? null : toAuthUserRecord(rows[0]);
+		},
+
+		async rotateRefreshToken(input) {
+			return prisma.$transaction(async (tx) => {
+				const revoked = await tx.refresh_tokens.updateMany({
+					where: {
+						token_hash: input.tokenHash,
+						user_id: input.userId,
+						is_revoked: false,
+					},
+					data: { is_revoked: true },
+				});
+				if (revoked.count === 1) {
+					await tx.refresh_tokens.create({
+						data: {
+							user_id: input.userId,
+							token_hash: input.replacementTokenHash,
+							is_revoked: false,
+							expires_at: input.replacementExpiresAt,
+							created_at: new Date(),
+						},
+					});
+					return "rotated";
+				}
+
+				const existing = await tx.refresh_tokens.findFirst({
+					where: { token_hash: input.tokenHash },
+					select: { is_revoked: true },
+				});
+				return existing === null ? "not_found" : "revoked";
+			});
+		},
+
+		async revokeRefreshTokenByHash(tokenHash) {
+			await prisma.refresh_tokens.updateMany({
+				where: { token_hash: tokenHash, is_revoked: false },
+				data: { is_revoked: true },
+			});
+		},
 	};
 }
 
@@ -268,6 +340,51 @@ function userResponse(user: AuthUserRecord) {
 	};
 }
 
+function setRefreshCookie(response: Response, refreshToken: string, config: AuthConfig): void {
+	// Express's response.cookie adds an Expires attribute whenever maxAge is
+	// supplied. Starlette's set_cookie call in the reference sends only
+	// Max-Age, so write the small fixed cookie contract directly instead.
+	const cookie = [
+		`${REFRESH_COOKIE_NAME}=${refreshToken}`,
+		"HttpOnly",
+		`Max-Age=${config.refreshTokenExpireDays * 86_400}`,
+		"Path=/api/auth",
+		"SameSite=lax",
+	];
+	if (config.cookieSecure) cookie.push("Secure");
+	response.append("Set-Cookie", cookie.join("; "));
+}
+
+function clearRefreshCookie(response: Response, config: AuthConfig): void {
+	const cookie = [
+		`${REFRESH_COOKIE_NAME}=\"\"`,
+		"expires=Thu, 01 Jan 1970 00:00:00 GMT",
+		"HttpOnly",
+		"Max-Age=0",
+		"Path=/api/auth",
+		"SameSite=lax",
+	];
+	if (config.cookieSecure) cookie.push("Secure");
+	response.append("Set-Cookie", cookie.join("; "));
+}
+
+function refreshTokenFromCookie(request: Request): string | null {
+	const cookieHeader = request.get("Cookie");
+	if (cookieHeader === undefined) return null;
+
+	for (const segment of cookieHeader.split(";")) {
+		const [name, ...value] = segment.trim().split("=");
+		if (name === REFRESH_COOKIE_NAME) return value.join("=") || null;
+	}
+	return null;
+}
+
+function parseTokenSubject(subject: string): number | null {
+	if (!/^\d+$/.test(subject)) return null;
+	const userId = Number(subject);
+	return Number.isSafeInteger(userId) && userId > 0 ? userId : null;
+}
+
 async function issueTokens(
 	user: AuthUserRecord,
 	repository: AuthRepository,
@@ -285,18 +402,7 @@ async function issueTokens(
 		expiresAt: new Date(refreshPayload.exp * 1000),
 	});
 
-	// Express's response.cookie adds an Expires attribute whenever maxAge is
-	// supplied. Starlette's set_cookie call in the reference sends only
-	// Max-Age, so write the small fixed cookie contract directly instead.
-	const cookie = [
-		`${REFRESH_COOKIE_NAME}=${refreshToken}`,
-		"HttpOnly",
-		`Max-Age=${config.refreshTokenExpireDays * 86_400}`,
-		"Path=/api/auth",
-		"SameSite=lax",
-	];
-	if (config.cookieSecure) cookie.push("Secure");
-	response.append("Set-Cookie", cookie.join("; "));
+	setRefreshCookie(response, refreshToken, config);
 	response.json({ access_token: accessToken, user: userResponse(user) });
 }
 
@@ -457,6 +563,83 @@ export function createAuthRouter(input: {
 
 			await input.repository.recordPinLogin({ userId: user.id, ipAddress: clientAddress(request) });
 			await issueTokens(user, input.repository, input.config, response);
+		} catch (error) {
+			next(error);
+		}
+	});
+
+	router.post("/refresh", async (request, response, next) => {
+		try {
+			const refreshToken = refreshTokenFromCookie(request);
+			if (refreshToken === null) {
+				response.status(401).json({ detail: "No refresh token" });
+				return;
+			}
+
+			const payload = await decodeRefreshToken(refreshToken, input.config);
+			const userId = payload === null ? null : parseTokenSubject(payload.sub);
+			if (userId === null) {
+				response.status(401).json({ detail: "Invalid or expired refresh token" });
+				return;
+			}
+
+			const tokenHash = createHash("sha256").update(refreshToken).digest("hex");
+			const stored = await input.repository.findRefreshTokenByHash(tokenHash);
+			if (stored === null) {
+				response.status(401).json({ detail: "Refresh token not found" });
+				return;
+			}
+			if (stored.is_revoked) {
+				clearRefreshCookie(response, input.config);
+				response.status(401).json({ detail: "Refresh token already used" });
+				return;
+			}
+
+			const user = await input.repository.findActiveUserById(userId);
+			if (user === null) {
+				clearRefreshCookie(response, input.config);
+				response.status(401).json({ detail: "User not found or inactive" });
+				return;
+			}
+
+			const accessToken = await createAccessToken(user.id, user.role, input.config);
+			const replacementRefreshToken = await createRefreshToken(user.id, input.config);
+			const replacementPayload = await decodeRefreshToken(replacementRefreshToken, input.config);
+			if (replacementPayload === null) throw new Error("Unable to create refresh token");
+
+			const rotation = await input.repository.rotateRefreshToken({
+				tokenHash,
+				userId,
+				replacementTokenHash: createHash("sha256").update(replacementRefreshToken).digest("hex"),
+				replacementExpiresAt: new Date(replacementPayload.exp * 1000),
+			});
+			if (rotation === "not_found") {
+				response.status(401).json({ detail: "Refresh token not found" });
+				return;
+			}
+			if (rotation === "revoked") {
+				clearRefreshCookie(response, input.config);
+				response.status(401).json({ detail: "Refresh token already used" });
+				return;
+			}
+
+			setRefreshCookie(response, replacementRefreshToken, input.config);
+			response.json({ access_token: accessToken, user: userResponse(user) });
+		} catch (error) {
+			next(error);
+		}
+	});
+
+	router.post("/logout", async (request, response, next) => {
+		try {
+			const refreshToken = refreshTokenFromCookie(request);
+			if (refreshToken !== null) {
+				await input.repository.revokeRefreshTokenByHash(
+					createHash("sha256").update(refreshToken).digest("hex"),
+				);
+			}
+			clearRefreshCookie(response, input.config);
+			response.json({ detail: "Logged out" });
 		} catch (error) {
 			next(error);
 		}

@@ -1,8 +1,10 @@
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createPrismaAuthRepository } from "../../src/routes/auth.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../");
 const sourceDatabase = resolve(repositoryRoot, "data/chores_os.db");
@@ -205,6 +207,73 @@ describe("Prisma SQLite foundation", () => {
       }
     } finally {
       await prisma.app_settings.delete({ where: { key } });
+    }
+  });
+
+  it("atomically rotates and idempotently revokes refresh-token records", async () => {
+    const activeUser = await prisma.users.findFirst({
+      where: { is_active: true },
+      select: { id: true },
+    });
+    expect(activeUser).not.toBeNull();
+    if (activeUser === null) return;
+
+    const oldHash = createHash("sha256").update(`phase3d2-old-${randomUUID()}`).digest("hex");
+    const replacementHash = createHash("sha256").update(`phase3d2-new-${randomUUID()}`).digest("hex");
+    const logoutHash = createHash("sha256").update(`phase3d2-logout-${randomUUID()}`).digest("hex");
+    const expiresAt = new Date(Date.now() + 60_000);
+    const repository = createPrismaAuthRepository(prisma);
+
+    await prisma.refresh_tokens.create({
+      data: {
+        user_id: activeUser.id,
+        token_hash: oldHash,
+        is_revoked: false,
+        expires_at: expiresAt,
+        created_at: new Date(),
+      },
+    });
+
+    try {
+      await expect(repository.rotateRefreshToken({
+        tokenHash: oldHash,
+        userId: activeUser.id,
+        replacementTokenHash: replacementHash,
+        replacementExpiresAt: expiresAt,
+      })).resolves.toBe("rotated");
+      await expect(repository.rotateRefreshToken({
+        tokenHash: oldHash,
+        userId: activeUser.id,
+        replacementTokenHash: replacementHash,
+        replacementExpiresAt: expiresAt,
+      })).resolves.toBe("revoked");
+
+      const records = await prisma.refresh_tokens.findMany({
+        where: { token_hash: { in: [oldHash, replacementHash] } },
+        orderBy: { token_hash: "asc" },
+      });
+      expect(records).toHaveLength(2);
+      expect(records.find((record) => record.token_hash === oldHash)?.is_revoked).toBe(true);
+      expect(records.find((record) => record.token_hash === replacementHash)?.is_revoked).toBe(false);
+
+      await prisma.refresh_tokens.create({
+        data: {
+          user_id: activeUser.id,
+          token_hash: logoutHash,
+          is_revoked: false,
+          expires_at: expiresAt,
+          created_at: new Date(),
+        },
+      });
+      await repository.revokeRefreshTokenByHash(logoutHash);
+      await repository.revokeRefreshTokenByHash(logoutHash);
+      await expect(prisma.refresh_tokens.findFirst({ where: { token_hash: logoutHash } })).resolves.toMatchObject({
+        is_revoked: true,
+      });
+    } finally {
+      await prisma.refresh_tokens.deleteMany({
+        where: { token_hash: { in: [oldHash, replacementHash, logoutHash] } },
+      });
     }
   });
 });

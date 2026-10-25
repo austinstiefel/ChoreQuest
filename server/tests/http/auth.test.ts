@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
+import { SignJWT } from "jose";
 import request from "supertest";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword, hashPin, verifyPassword } from "../../src/auth/passwords.js";
-import { decodeAccessToken } from "../../src/auth/tokens.js";
+import {
+	createAccessToken,
+	createRefreshToken,
+	decodeAccessToken,
+	decodeRefreshToken,
+} from "../../src/auth/tokens.js";
 import { createApp } from "../../src/app.js";
 import type { AuthConfig } from "../../src/config/auth.js";
 import {
@@ -30,7 +36,13 @@ type AuditEntry = {
 class InMemoryAuthRepository implements AuthRepository {
 	readonly settings = new Map<string, string>();
 	readonly audits: AuditEntry[] = [];
-	readonly refreshTokens: Array<{ userId: number; tokenHash: string; expiresAt: Date }> = [];
+	readonly refreshTokens: Array<{
+		id: number;
+		userId: number;
+		tokenHash: string;
+		isRevoked: boolean;
+		expiresAt: Date;
+	}> = [];
 
 	constructor(readonly users: AuthUserRecord[]) {}
 
@@ -107,7 +119,48 @@ class InMemoryAuthRepository implements AuthRepository {
 		tokenHash: string;
 		expiresAt: Date;
 	}): Promise<void> {
-		this.refreshTokens.push(input);
+		this.refreshTokens.push({
+			id: this.refreshTokens.length + 1,
+			...input,
+			isRevoked: false,
+		});
+	}
+
+	async findRefreshTokenByHash(tokenHash: string) {
+		const token = this.refreshTokens.find((candidate) => candidate.tokenHash === tokenHash);
+		return token === undefined
+			? null
+			: { id: token.id, user_id: token.userId, is_revoked: token.isRevoked };
+	}
+
+	async findActiveUserById(userId: number): Promise<AuthUserRecord | null> {
+		return this.users.find((candidate) => candidate.id === userId && candidate.is_active) ?? null;
+	}
+
+	async rotateRefreshToken(input: {
+		tokenHash: string;
+		userId: number;
+		replacementTokenHash: string;
+		replacementExpiresAt: Date;
+	}): Promise<"rotated" | "not_found" | "revoked"> {
+		const token = this.refreshTokens.find((candidate) => candidate.tokenHash === input.tokenHash);
+		if (token === undefined) return "not_found";
+		if (token.userId !== input.userId || token.isRevoked) return "revoked";
+
+		token.isRevoked = true;
+		this.refreshTokens.push({
+			id: this.refreshTokens.length + 1,
+			userId: input.userId,
+			tokenHash: input.replacementTokenHash,
+			isRevoked: false,
+			expiresAt: input.replacementExpiresAt,
+		});
+		return "rotated";
+	}
+
+	async revokeRefreshTokenByHash(tokenHash: string): Promise<void> {
+		const token = this.refreshTokens.find((candidate) => candidate.tokenHash === tokenHash);
+		if (token !== undefined && !token.isRevoked) token.isRevoked = true;
 	}
 }
 
@@ -134,6 +187,24 @@ function user(overrides: Partial<AuthUserRecord> = {}): AuthUserRecord {
 
 function authApp(repository: AuthRepository, rateLimiter = new SlidingWindowRateLimiter()) {
 	return createApp(createAuthRouter({ config, repository, rateLimiter }));
+}
+
+function refreshCookie(token: string): string {
+	return `refresh_token=${token}`;
+}
+
+async function persistRefreshToken(
+	repository: InMemoryAuthRepository,
+	token: string,
+	userId = 1,
+): Promise<void> {
+	const payload = await decodeRefreshToken(token, config);
+	if (payload === null) throw new Error("test refresh token must be valid");
+	await repository.storeRefreshToken({
+		userId,
+		tokenHash: createHash("sha256").update(token).digest("hex"),
+		expiresAt: new Date(payload.exp * 1000),
+	});
 }
 
 describe("public authentication endpoints", () => {
@@ -372,5 +443,162 @@ describe("public authentication endpoints", () => {
 			.send({ username: "Unknown", pin: "123456" })
 			.expect(429, { detail: "Too many requests" });
 		await request(app).post("/api/auth/register").send({}).expect(404);
+	});
+
+	it("rejects missing, invalid, expired, malformed, and wrong-type refresh tokens", async () => {
+		const app = authApp(repository);
+		await request(app).post("/api/auth/refresh").expect(401, { detail: "No refresh token" });
+
+		const expired = await new SignJWT({ type: "refresh", exp: 1 })
+			.setProtectedHeader({ alg: "HS256", typ: "JWT" })
+			.setSubject("1")
+			.sign(new TextEncoder().encode(config.secretKey));
+		const access = await createAccessToken(1, "admin", config);
+		for (const token of ["not-a-jwt", expired, access]) {
+			const response = await request(app)
+				.post("/api/auth/refresh")
+				.set("Cookie", refreshCookie(token))
+				.expect(401, { detail: "Invalid or expired refresh token" });
+			expect(response.headers["set-cookie"]).toBeUndefined();
+		}
+	});
+
+	it("rejects unknown, revoked, deleted, and inactive refresh-token sessions with Python-compatible cookie behavior", async () => {
+		const app = authApp(repository);
+		const unknown = await createRefreshToken(1, config);
+		const unknownResponse = await request(app)
+			.post("/api/auth/refresh")
+			.set("Cookie", refreshCookie(unknown))
+			.expect(401, { detail: "Refresh token not found" });
+		expect(unknownResponse.headers["set-cookie"]).toBeUndefined();
+
+		const revoked = await createRefreshToken(1, config);
+		await persistRefreshToken(repository, revoked);
+		repository.refreshTokens[0].isRevoked = true;
+		const revokedResponse = await request(app)
+			.post("/api/auth/refresh")
+			.set("Cookie", refreshCookie(revoked))
+			.expect(401, { detail: "Refresh token already used" });
+		expect(revokedResponse.headers["set-cookie"][0]).toBe(
+			'refresh_token=""; expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Max-Age=0; Path=/api/auth; SameSite=lax',
+		);
+
+		const deletedRepository = new InMemoryAuthRepository([]);
+		const deleted = await createRefreshToken(1, config);
+		await persistRefreshToken(deletedRepository, deleted);
+		await request(authApp(deletedRepository))
+			.post("/api/auth/refresh")
+			.set("Cookie", refreshCookie(deleted))
+			.expect(401, { detail: "User not found or inactive" })
+			.expect("Set-Cookie", /Max-Age=0/);
+
+		repository.users[0].is_active = false;
+		const inactive = await createRefreshToken(1, config);
+		await persistRefreshToken(repository, inactive);
+		await request(app)
+			.post("/api/auth/refresh")
+			.set("Cookie", refreshCookie(inactive))
+			.expect(401, { detail: "User not found or inactive" })
+			.expect("Set-Cookie", /Max-Age=0/);
+	});
+
+	it("rotates a refresh token atomically and persists only the replacement hash", async () => {
+		const original = await createRefreshToken(1, config);
+		await persistRefreshToken(repository, original);
+		const response = await request(authApp(repository))
+			.post("/api/auth/refresh")
+			.set("Cookie", refreshCookie(original))
+			.expect(200);
+
+		expect(response.body.user).toMatchObject({ id: 1, username: "Admin", role: "admin" });
+		await expect(decodeAccessToken(response.body.access_token, config)).resolves.toMatchObject({
+			sub: "1",
+			type: "access",
+		});
+		const replacement = /refresh_token=([^;]+)/.exec(response.headers["set-cookie"][0])?.[1];
+		expect(replacement).toBeDefined();
+		expect(replacement).not.toBe(original);
+		expect(response.headers["set-cookie"][0]).toMatch(
+			/^refresh_token=.*; HttpOnly; Max-Age=2592000; Path=\/api\/auth; SameSite=lax$/,
+		);
+		expect(repository.refreshTokens).toHaveLength(2);
+		expect(repository.refreshTokens[0]).toMatchObject({ isRevoked: true });
+		expect(repository.refreshTokens[1]).toMatchObject({
+			isRevoked: false,
+			tokenHash: createHash("sha256").update(replacement).digest("hex"),
+		});
+		expect(repository.refreshTokens.map((token) => token.tokenHash)).not.toContain(original);
+	});
+
+	it("allows only one concurrent refresh rotation from the same token", async () => {
+		const original = await createRefreshToken(1, config);
+		await persistRefreshToken(repository, original);
+		const app = authApp(repository);
+		const responses = await Promise.all([
+			request(app).post("/api/auth/refresh").set("Cookie", refreshCookie(original)),
+			request(app).post("/api/auth/refresh").set("Cookie", refreshCookie(original)),
+		]);
+
+		expect(responses.map((response) => response.status).sort()).toEqual([200, 401]);
+		expect(responses.find((response) => response.status === 401)?.body).toEqual({
+			detail: "Refresh token already used",
+		});
+		expect(repository.refreshTokens).toHaveLength(2);
+		expect(repository.refreshTokens.filter((token) => !token.isRevoked)).toHaveLength(1);
+	});
+
+	it("uses the generic error response for refresh repository failures", async () => {
+		class FailingRepository extends InMemoryAuthRepository {
+			override async findRefreshTokenByHash(): Promise<null> {
+				throw new Error("database connection secret detail");
+			}
+		}
+		const failingRepository = new FailingRepository([user()]);
+		const token = await createRefreshToken(1, config);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const response = await request(authApp(failingRepository))
+			.post("/api/auth/refresh")
+			.set("Cookie", refreshCookie(token))
+			.expect(500);
+
+		expect(response.body).toEqual({
+			error: "Internal Server Error",
+			message: "An unexpected error occurred.",
+		});
+		expect(JSON.stringify(response.body)).not.toContain("secret detail");
+		expect(errorSpy).toHaveBeenCalled();
+		errorSpy.mockRestore();
+	});
+
+	it("logs out without requiring a decodable token and always clears the cookie", async () => {
+		const app = authApp(repository);
+		for (const token of [undefined, "unknown-token", "malformed-token"]) {
+			const response = token === undefined
+				? await request(app).post("/api/auth/logout").expect(200, { detail: "Logged out" })
+				: await request(app)
+						.post("/api/auth/logout")
+						.set("Cookie", refreshCookie(token))
+						.expect(200, { detail: "Logged out" });
+			expect(response.headers["set-cookie"][0]).toMatch(
+				/^refresh_token=""; expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Max-Age=0; Path=\/api\/auth; SameSite=lax$/,
+			);
+		}
+
+		const known = await createRefreshToken(1, config);
+		await persistRefreshToken(repository, known);
+		await request(app)
+			.post("/api/auth/logout")
+			.set("Cookie", refreshCookie(known))
+			.expect(200, { detail: "Logged out" });
+		expect(repository.refreshTokens[0].isRevoked).toBe(true);
+
+		const alreadyRevoked = await createRefreshToken(1, config);
+		await persistRefreshToken(repository, alreadyRevoked);
+		repository.refreshTokens[1].isRevoked = true;
+		await request(app)
+			.post("/api/auth/logout")
+			.set("Cookie", refreshCookie(alreadyRevoked))
+			.expect(200, { detail: "Logged out" });
+		expect(repository.refreshTokens[1].isRevoked).toBe(true);
 	});
 });

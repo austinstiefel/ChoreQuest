@@ -4,6 +4,7 @@ import {
 	SignJWT,
 	type JWTPayload,
 } from "jose";
+import { randomUUID } from "node:crypto";
 import type { AuthConfig } from "../config/auth.js";
 
 const HS256 = "HS256";
@@ -37,9 +38,13 @@ function expirationFromNow(seconds: number): number {
 	return Math.floor(Date.now() / 1000) + seconds;
 }
 
-async function signToken(payload: JWTPayload, config: AuthConfig): Promise<string> {
+async function signToken(
+	payload: JWTPayload,
+	config: AuthConfig,
+	protectedHeader: Record<string, string> = {},
+): Promise<string> {
 	return new SignJWT(payload)
-		.setProtectedHeader({ alg: HS256, typ: "JWT" })
+		.setProtectedHeader({ alg: HS256, typ: "JWT", ...protectedHeader })
 		.sign(signingKey(config));
 }
 
@@ -62,6 +67,9 @@ export function createAccessToken(
 
 /** Create an HS256 refresh JWT with the payload used by the Python backend. */
 export function createRefreshToken(userId: number, config: AuthConfig): Promise<string> {
+	// HS256 signatures are deterministic for identical headers and payloads.
+	// Preserve the Python-compatible claims while making each persisted refresh
+	// credential distinct, including rotations that occur in the same second.
 	return signToken(
 		{
 			sub: String(userId),
@@ -69,6 +77,7 @@ export function createRefreshToken(userId: number, config: AuthConfig): Promise<
 			type: "refresh",
 		},
 		config,
+		{ kid: randomUUID() },
 	);
 }
 
