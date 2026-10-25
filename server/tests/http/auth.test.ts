@@ -293,6 +293,17 @@ describe("public authentication endpoints", () => {
 			.expect(403, { detail: "Account is disabled" });
 	});
 
+	it("treats a malformed stored password hash as invalid credentials", async () => {
+		repository.users[0].password_hash = "$2b$12$malformed-bcrypt-hash";
+		const response = await request(authApp(repository))
+			.post("/api/auth/login")
+			.send({ username: "Admin", password: "ConfiguredPassword42" })
+			.expect(401, { detail: "Invalid username or password" });
+
+		expect(JSON.stringify(response.body)).not.toContain(repository.users[0].password_hash);
+		expect(repository.audits).toHaveLength(0);
+	});
+
 	it("logs in with an ASCII six-digit PIN and rejects malformed, invalid, missing, and disabled accounts", async () => {
 		repository.users[0].pin_hash = await hashPin("123456");
 		const app = authApp(repository);

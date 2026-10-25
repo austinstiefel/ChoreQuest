@@ -11,6 +11,7 @@ const app = createApp(
 		config: authConfig,
 		repository: createPrismaAuthRepository(prisma),
 	}),
+	authConfig,
 );
 
 const port = Number(process.env.PORT ?? 3000);

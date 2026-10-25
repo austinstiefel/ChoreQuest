@@ -9,8 +9,14 @@ export function hashPassword(password: string): Promise<string> {
 	return bcrypt.hash(password, BCRYPT_ROUNDS);
 }
 
-export function verifyPassword(password: string, passwordHash: string): Promise<boolean> {
-	return bcrypt.compare(password, passwordHash);
+export async function verifyPassword(password: string, passwordHash: string): Promise<boolean> {
+	try {
+		return await bcrypt.compare(password, passwordHash);
+	} catch {
+		// A corrupt legacy database row is an invalid credential, not an
+		// operational error to expose through the login endpoint.
+		return false;
+	}
 }
 
 export function hashPin(pin: string): Promise<string> {
