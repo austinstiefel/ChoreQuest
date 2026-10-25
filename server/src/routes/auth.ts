@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { Router, type Request, type Response } from "express";
-import { hashPassword, verifyPassword, verifyPin } from "../auth/passwords.js";
+import { hashPassword, hashPin, verifyPassword, verifyPin } from "../auth/passwords.js";
 import {
 	createAccessToken,
 	createRefreshToken,
 	decodeRefreshToken,
 } from "../auth/tokens.js";
 import type { AuthConfig } from "../config/auth.js";
+import {
+	createAuthenticateRequest,
+	createPrismaAuthUserRepository,
+	type AuthUserRepository,
+} from "../middleware/auth.js";
 
 const REFRESH_COOKIE_NAME = "refresh_token";
 const SETUP_COMPLETE_KEY = "initial_setup_complete";
@@ -37,7 +42,7 @@ export interface RefreshTokenRecord {
 	is_revoked: boolean;
 }
 
-export interface AuthRepository {
+export interface AuthRepository extends AuthUserRepository {
 	findFirstActiveAdmin(): Promise<AuthUserRecord | null>;
 	findActiveAdmins(): Promise<AuthUserRecord[]>;
 	findSetting(key: string): Promise<string | null>;
@@ -67,6 +72,17 @@ export interface AuthRepository {
 		replacementExpiresAt: Date;
 	}): Promise<"rotated" | "not_found" | "revoked">;
 	revokeRefreshTokenByHash(tokenHash: string): Promise<void>;
+	updateProfile(input: {
+		userId: number;
+		displayName?: string;
+		avatarConfig?: Record<string, unknown>;
+	}): Promise<void>;
+	changePassword(input: {
+		userId: number;
+		passwordHash: string;
+		ipAddress: string | null;
+	}): Promise<void>;
+	setPin(input: { userId: number; pinHash: string }): Promise<void>;
 }
 
 export interface AuthRateLimiter {
@@ -120,6 +136,7 @@ function toAuthUserRecord(user: RawUserRecord): AuthUserRecord {
  */
 export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository {
 	return {
+		...createPrismaAuthUserRepository(prisma),
 		async findFirstActiveAdmin() {
 			const rows = await prisma.$queryRaw<RawUserRecord[]>`
         SELECT id, username, display_name, password_hash, pin_hash, role,
@@ -289,6 +306,45 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 				data: { is_revoked: true },
 			});
 		},
+
+		async updateProfile(input) {
+			// Null and omitted values both preserve existing fields, as in Python.
+			// A single parameterized statement also handles the legacy JSON column.
+			await prisma.$executeRaw`
+        UPDATE users
+        SET display_name = COALESCE(${input.displayName ?? null}, display_name),
+          avatar_config = CASE WHEN ${input.avatarConfig !== undefined}
+            THEN ${input.avatarConfig === undefined ? null : JSON.stringify(input.avatarConfig)}
+            ELSE avatar_config END,
+          updated_at = ${new Date()}
+        WHERE id = ${input.userId}
+      `;
+		},
+
+		async changePassword(input) {
+			await prisma.$transaction(async (tx) => {
+				const now = new Date();
+				await tx.users.update({
+					where: { id: input.userId },
+					data: { password_hash: input.passwordHash, updated_at: now },
+				});
+				await tx.refresh_tokens.updateMany({
+					where: { user_id: input.userId, is_revoked: false },
+					data: { is_revoked: true },
+				});
+				await tx.$executeRaw`
+          INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
+          VALUES (${input.userId}, ${"password_change"}, ${"{}"}, ${input.ipAddress}, ${now})
+        `;
+			});
+		},
+
+		async setPin(input) {
+			await prisma.users.update({
+				where: { id: input.userId },
+				data: { pin_hash: input.pinHash, updated_at: new Date() },
+			});
+		},
 	};
 }
 
@@ -320,6 +376,75 @@ function stringField(body: unknown, field: string): string | null {
 	if (typeof body !== "object" || body === null) return null;
 	const value = (body as Record<string, unknown>)[field];
 	return typeof value === "string" ? value : null;
+}
+
+interface AccountFieldRule {
+	type: "string" | "dict";
+	optional?: boolean;
+	minLength?: number;
+	maxLength?: number;
+	pattern?: RegExp;
+}
+
+/** Pydantic-style account validation; extra fields are ignored, inputs are not echoed. */
+function accountBody(
+	body: unknown,
+	response: Response,
+	rules: Record<string, AccountFieldRule>,
+): Record<string, unknown> | null {
+	if (body === undefined) {
+		response.status(422).json({ detail: [{ type: "missing", loc: ["body"], msg: "Field required" }] });
+		return null;
+	}
+	if (typeof body !== "object" || body === null || Array.isArray(body)) {
+		response.status(422).json({ detail: [{
+			type: "model_attributes_type",
+			loc: ["body"],
+			msg: "Input should be a valid dictionary or object to extract fields from",
+		}] });
+		return null;
+	}
+	const values = body as Record<string, unknown>;
+	const errors: Array<{
+		type: string;
+		loc: string[];
+		msg: string;
+		ctx?: Record<string, unknown>;
+	}> = [];
+	for (const [field, rule] of Object.entries(rules)) {
+		const value = values[field];
+		const loc = ["body", field];
+		if (rule.optional && (value === undefined || value === null)) continue;
+		if (value === undefined) {
+			errors.push({ type: "missing", loc, msg: "Field required" });
+		} else if (rule.type === "dict") {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) {
+				errors.push({ type: "dict_type", loc, msg: "Input should be a valid dictionary" });
+			}
+		} else if (typeof value !== "string") {
+			errors.push({ type: "string_type", loc, msg: "Input should be a valid string" });
+		} else {
+			// Python/Pydantic counts Unicode code points, rather than UTF-16 units.
+			const length = [...value].length;
+			if (rule.minLength !== undefined && length < rule.minLength) {
+				errors.push({ type: "string_too_short", loc,
+					msg: `String should have at least ${rule.minLength} characters`,
+					ctx: { min_length: rule.minLength } });
+			} else if (rule.maxLength !== undefined && length > rule.maxLength) {
+				errors.push({ type: "string_too_long", loc,
+					msg: `String should have at most ${rule.maxLength} characters`,
+					ctx: { max_length: rule.maxLength } });
+			} else if (rule.pattern !== undefined && !rule.pattern.test(value)) {
+				errors.push({ type: "string_pattern_mismatch", loc,
+					msg: "String should match pattern '^\\d{6}$'", ctx: { pattern: "^\\d{6}$" } });
+			}
+		}
+	}
+	if (errors.length > 0) {
+		response.status(422).json({ detail: errors });
+		return null;
+	}
+	return values;
 }
 
 function userResponse(user: AuthUserRecord) {
@@ -413,6 +538,14 @@ export function createAuthRouter(input: {
 }): Router {
 	const router = Router();
 	const rateLimiter = input.rateLimiter ?? new SlidingWindowRateLimiter();
+	const authenticate = createAuthenticateRequest(input.config, input.repository);
+
+	async function currentAccount(request: Request, response: Response): Promise<AuthUserRecord | null> {
+		const userId = request.authenticatedUser?.id;
+		const user = userId === undefined ? null : await input.repository.findActiveUserById(userId);
+		if (user === null) response.status(401).json({ detail: "User not found or inactive" });
+		return user;
+	}
 
 	router.get("/setup-status", async (_request, response, next) => {
 		try {
@@ -643,6 +776,59 @@ export function createAuthRouter(input: {
 		} catch (error) {
 			next(error);
 		}
+	});
+
+	router.get("/me", authenticate, async (request, response) => {
+		const user = await currentAccount(request, response);
+		if (user !== null) response.json(userResponse(user));
+	});
+
+	router.put("/me", authenticate, async (request, response) => {
+		const body = accountBody(request.body, response, {
+			display_name: { type: "string", optional: true, maxLength: 10 },
+			avatar_config: { type: "dict", optional: true },
+		});
+		if (body === null) return;
+		const user = await currentAccount(request, response);
+		if (user === null) return;
+		await input.repository.updateProfile({
+			userId: user.id,
+			displayName: (body.display_name ?? undefined) as string | undefined,
+			avatarConfig: (body.avatar_config ?? undefined) as Record<string, unknown> | undefined,
+		});
+		const updatedUser = await currentAccount(request, response);
+		if (updatedUser !== null) response.json(userResponse(updatedUser));
+	});
+
+	router.post("/change-password", authenticate, async (request, response) => {
+		const body = accountBody(request.body, response, {
+			current_password: { type: "string" },
+			new_password: { type: "string", minLength: 6 },
+		});
+		if (body === null) return;
+		const user = await currentAccount(request, response);
+		if (user === null) return;
+		if (!(await verifyPassword(body.current_password as string, user.password_hash))) {
+			response.status(400).json({ detail: "Current password is incorrect" });
+			return;
+		}
+		await input.repository.changePassword({
+			userId: user.id,
+			passwordHash: await hashPassword(body.new_password as string),
+			ipAddress: clientAddress(request),
+		});
+		response.json({ detail: "Password changed. Please log in again." });
+	});
+
+	router.post("/set-pin", authenticate, async (request, response) => {
+		const body = accountBody(request.body, response, {
+			pin: { type: "string", minLength: 6, maxLength: 6, pattern: /^[0-9]{6}$/ },
+		});
+		if (body === null) return;
+		const user = await currentAccount(request, response);
+		if (user === null) return;
+		await input.repository.setPin({ userId: user.id, pinHash: await hashPin(body.pin as string) });
+		response.json({ detail: "PIN set successfully" });
 	});
 
 	return router;

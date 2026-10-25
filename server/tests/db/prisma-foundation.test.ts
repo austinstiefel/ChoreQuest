@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaAuthRepository } from "../../src/routes/auth.js";
+import { hashPassword, hashPin, verifyPassword, verifyPin } from "../../src/auth/passwords.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../");
 const sourceDatabase = resolve(repositoryRoot, "data/chores_os.db");
@@ -274,6 +275,81 @@ describe("Prisma SQLite foundation", () => {
       await prisma.refresh_tokens.deleteMany({
         where: { token_hash: { in: [oldHash, replacementHash, logoutHash] } },
       });
+    }
+  });
+
+  it("persists account updates and rolls back password/session changes if audit persistence fails", async () => {
+    // All writes below target the disposable copy established in beforeAll.
+    const repository = createPrismaAuthRepository(prisma);
+    const originalHash = await hashPassword("OriginalTestPassword42");
+    const replacementHash = await hashPassword("ReplacementTestPassword42");
+    const createUser = (username: string) => prisma.users.create({
+      data: {
+        username, display_name: "Test User", password_hash: originalHash,
+        pin_hash: null, role: "kid", points_balance: 0, total_points_earned: 0,
+        current_streak: 0, longest_streak: 0, streak_freezes_used: 0,
+        streak_freeze_month: null, last_streak_date: null, is_active: true,
+        created_at: new Date(), updated_at: new Date(),
+      },
+    });
+    const owner = await createUser(`phase3d3-owner-${randomUUID()}`);
+    const other = await createUser(`phase3d3-other-${randomUUID()}`);
+    const userIds = [owner.id, other.id];
+    try {
+      for (const userId of [owner.id, owner.id, other.id]) {
+        await repository.storeRefreshToken({
+          userId, tokenHash: createHash("sha256").update(randomUUID()).digest("hex"),
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+      }
+      const avatar = { hat: "blue", nested: { enabled: true }, items: [1, null, "😀"] };
+      await repository.updateProfile({ userId: owner.id, displayName: "New Name", avatarConfig: avatar });
+      const updated = await repository.findActiveUserById(owner.id);
+      expect(updated).toMatchObject({ display_name: "New Name", avatar_config: avatar, role: "kid" });
+      expect(updated?.created_at).toBeInstanceOf(Date);
+      expect(updated?.is_active).toBe(true);
+      await repository.updateProfile({ userId: owner.id });
+      expect(await repository.findActiveUserById(owner.id)).toEqual(updated);
+      await repository.updateProfile({ userId: owner.id, displayName: "" });
+      expect(await repository.findActiveUserById(owner.id)).toMatchObject({ display_name: "", avatar_config: avatar });
+
+      const pinHash = await hashPin("012345");
+      await repository.setPin({ userId: owner.id, pinHash });
+      const afterPin = await prisma.users.findUniqueOrThrow({ where: { id: owner.id } });
+      expect(afterPin.pin_hash).not.toBe("012345");
+      await expect(verifyPin("012345", afterPin.pin_hash!)).resolves.toBe(true);
+      expect(await prisma.refresh_tokens.count({ where: { user_id: owner.id, is_revoked: false } })).toBe(2);
+      expect((await prisma.users.findUniqueOrThrow({ where: { id: other.id } })).pin_hash).toBeNull();
+
+      // Force failure after the password update and refresh revocations, so
+      // this tests an actual SQLite transaction rollback rather than a mock.
+      await prisma.$executeRawUnsafe(`
+        CREATE TRIGGER phase3d3_fail_audit BEFORE INSERT ON audit_logs
+        WHEN NEW.action = 'password_change' AND NEW.ip_address = 'phase3d3-force-failure'
+        BEGIN SELECT RAISE(ABORT, 'forced test audit failure'); END
+      `);
+      await expect(repository.changePassword({
+        userId: owner.id, passwordHash: replacementHash, ipAddress: "phase3d3-force-failure",
+      })).rejects.toThrow();
+      expect((await prisma.users.findUniqueOrThrow({ where: { id: owner.id } })).password_hash).toBe(originalHash);
+      expect(await prisma.refresh_tokens.count({ where: { user_id: owner.id, is_revoked: false } })).toBe(2);
+      expect(await prisma.audit_logs.count({ where: { user_id: owner.id } })).toBe(0);
+
+      await repository.changePassword({ userId: owner.id, passwordHash: replacementHash, ipAddress: "127.0.0.1" });
+      const afterPassword = await prisma.users.findUniqueOrThrow({ where: { id: owner.id } });
+      await expect(verifyPassword("ReplacementTestPassword42", afterPassword.password_hash)).resolves.toBe(true);
+      expect(await prisma.refresh_tokens.count({ where: { user_id: owner.id, is_revoked: true } })).toBe(2);
+      expect(await prisma.refresh_tokens.count({ where: { user_id: other.id, is_revoked: false } })).toBe(1);
+      expect((await prisma.users.findUniqueOrThrow({ where: { id: other.id } })).password_hash).toBe(originalHash);
+      const audits = await prisma.$queryRaw<Array<{ action: string; details: string; ip_address: string }>>`
+        SELECT action, details, ip_address FROM audit_logs WHERE user_id = ${owner.id}
+      `;
+      expect(audits).toEqual([{ action: "password_change", details: "{}", ip_address: "127.0.0.1" }]);
+    } finally {
+      await prisma.$executeRawUnsafe("DROP TRIGGER IF EXISTS phase3d3_fail_audit");
+      await prisma.audit_logs.deleteMany({ where: { user_id: { in: userIds } } });
+      await prisma.refresh_tokens.deleteMany({ where: { user_id: { in: userIds } } });
+      await prisma.users.deleteMany({ where: { id: { in: userIds } } });
     }
   });
 });

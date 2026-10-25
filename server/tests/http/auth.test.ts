@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { SignJWT } from "jose";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { hashPassword, hashPin, verifyPassword } from "../../src/auth/passwords.js";
+import { hashPassword, hashPin, verifyPassword, verifyPin } from "../../src/auth/passwords.js";
 import {
 	createAccessToken,
 	createRefreshToken,
@@ -45,6 +45,32 @@ class InMemoryAuthRepository implements AuthRepository {
 	}> = [];
 
 	constructor(readonly users: AuthUserRecord[]) {}
+
+	async findUserById(userId: number) {
+		const user = this.users.find((candidate) => candidate.id === userId);
+		if (user === undefined) return null;
+		const { id, username, display_name, role, is_active } = user;
+		return { id, username, display_name, role, is_active };
+	}
+
+	async updateProfile(input: Parameters<AuthRepository["updateProfile"]>[0]): Promise<void> {
+		const user = this.users.find((candidate) => candidate.id === input.userId)!;
+		if (input.displayName !== undefined) user.display_name = input.displayName;
+		if (input.avatarConfig !== undefined) user.avatar_config = input.avatarConfig;
+	}
+
+	async changePassword(input: Parameters<AuthRepository["changePassword"]>[0]): Promise<void> {
+		const user = this.users.find((candidate) => candidate.id === input.userId)!;
+		user.password_hash = input.passwordHash;
+		for (const token of this.refreshTokens) {
+			if (token.userId === user.id) token.isRevoked = true;
+		}
+		this.audits.push({ userId: user.id, action: "password_change", details: {}, ipAddress: input.ipAddress });
+	}
+
+	async setPin(input: Parameters<AuthRepository["setPin"]>[0]): Promise<void> {
+		this.users.find((candidate) => candidate.id === input.userId)!.pin_hash = input.pinHash;
+	}
 
 	async findFirstActiveAdmin(): Promise<AuthUserRecord | null> {
 		return this.users.find((user) => user.role === "admin" && user.is_active) ?? null;
@@ -600,5 +626,182 @@ describe("public authentication endpoints", () => {
 			.set("Cookie", refreshCookie(alreadyRevoked))
 			.expect(200, { detail: "Logged out" });
 		expect(repository.refreshTokens[1].isRevoked).toBe(true);
+	});
+
+	it("requires active access-token authentication on all four account routes", async () => {
+		const app = authApp(repository);
+		const expired = await new SignJWT({ type: "access", role: "admin", exp: 1 })
+			.setProtectedHeader({ alg: "HS256" }).setSubject("1")
+			.sign(new TextEncoder().encode(config.secretKey));
+		const refresh = await createRefreshToken(1, config);
+		for (const [method, path] of [
+			["get", "/me"], ["put", "/me"], ["post", "/change-password"], ["post", "/set-pin"],
+		] as const) {
+			await request(app)[method](`/api/auth${path}`).expect(401, { detail: "Not authenticated" });
+			for (const token of ["malformed", expired, refresh]) {
+				await request(app)[method](`/api/auth${path}`)
+					.set("Authorization", `Bearer ${token}`)
+					.expect(401, { detail: "Invalid or expired token" });
+			}
+			for (const user of [undefined, { ...repository.users[0], is_active: false }]) {
+				const unavailable = new InMemoryAuthRepository(user === undefined ? [] : [user]);
+				await request(authApp(unavailable))[method](`/api/auth${path}`)
+					.set("Authorization", `Bearer ${await createAccessToken(1, "admin", config)}`)
+					.expect(401, { detail: "User not found or inactive" });
+			}
+		}
+	});
+
+	it("returns the full current profile and database role without credential fields", async () => {
+		const token = await createAccessToken(1, "admin", config);
+		repository.users[0].role = "kid";
+		const response = await request(authApp(repository)).get("/api/auth/me")
+			.set("Authorization", `Bearer ${token}`).expect(200);
+		const { password_hash, pin_hash, ...expected } = repository.users[0];
+		expect(response.body).toEqual({ ...expected, created_at: expected.created_at.toISOString() });
+		expect(response.body).not.toHaveProperty("password_hash");
+		expect(response.body).not.toHaveProperty("pin_hash");
+	});
+
+	it("updates only profile fields, preserves omitted/null fields, and ignores unauthorized fields", async () => {
+		const app = authApp(repository);
+		const authorization = `Bearer ${await createAccessToken(1, "kid", config)}`;
+		await request(app).put("/api/auth/me").set("Authorization", authorization)
+			.send({ display_name: "New Name" }).expect(200);
+		expect(repository.users[0]).toMatchObject({ display_name: "New Name", avatar_config: { item: "default" } });
+		await request(app).put("/api/auth/me").set("Authorization", authorization)
+			.send({ avatar_config: { hat: "blue", nested: { enabled: true }, items: [1, null] } }).expect(200);
+		expect(repository.users[0].display_name).toBe("New Name");
+		await request(app).put("/api/auth/me").set("Authorization", authorization)
+			.send({ display_name: "", avatar_config: {} }).expect(200);
+		const before = structuredClone(repository.users[0]);
+		for (const body of [{}, { display_name: null, avatar_config: null }, {
+			username: "hijacked", role: "kid", points_balance: 999, is_active: false,
+			password_hash: "unsafe", pin_hash: "unsafe", id: 2,
+		}]) {
+			await request(app).put("/api/auth/me").set("Authorization", authorization).send(body).expect(200);
+			expect(repository.users[0]).toEqual(before);
+		}
+		await request(app).put("/api/auth/me").set("Authorization", authorization)
+			.send({ display_name: "😀".repeat(10) }).expect(200);
+	});
+
+	it.each([
+		{ display_name: 10 }, { display_name: [] }, { display_name: "12345678901" },
+		{ avatar_config: [] }, { avatar_config: "invalid" }, { avatar_config: true },
+	])("rejects invalid profile fields: %j", async (body) => {
+		const before = structuredClone(repository.users[0]);
+		const response = await request(authApp(repository)).put("/api/auth/me")
+			.set("Authorization", `Bearer ${await createAccessToken(1, "admin", config)}`)
+			.send(body).expect(422);
+		expect(response.body.detail[0]).toHaveProperty("loc");
+		expect(repository.users[0]).toEqual(before);
+	});
+
+	it("returns Pydantic-compatible account validation details without echoing sensitive inputs", async () => {
+		const app = authApp(repository);
+		const authorization = `Bearer ${await createAccessToken(1, "admin", config)}`;
+		const profile = await request(app).put("/api/auth/me").set("Authorization", authorization)
+			.send({ display_name: "12345678901", avatar_config: [] }).expect(422);
+		expect(profile.body).toEqual({ detail: [
+			{ type: "string_too_long", loc: ["body", "display_name"], msg: "String should have at most 10 characters", ctx: { max_length: 10 } },
+			{ type: "dict_type", loc: ["body", "avatar_config"], msg: "Input should be a valid dictionary" },
+		] });
+		const password = await request(app).post("/api/auth/change-password").set("Authorization", authorization)
+			.send({ current_password: null, new_password: "short" }).expect(422);
+		expect(password.body).toEqual({ detail: [
+			{ type: "string_type", loc: ["body", "current_password"], msg: "Input should be a valid string" },
+			{ type: "string_too_short", loc: ["body", "new_password"], msg: "String should have at least 6 characters", ctx: { min_length: 6 } },
+		] });
+		await request(app).put("/api/auth/me").set("Authorization", authorization).send([]).expect(422);
+		await request(app).put("/api/auth/me").set("Authorization", authorization)
+			.expect(422, { detail: [{ type: "missing", loc: ["body"], msg: "Field required" }] });
+	});
+
+	it("changes a password, audits it, and revokes only that user's sessions while access tokens still work", async () => {
+		repository.users[0].password_hash = await hashPassword("OriginalPassword42");
+		repository.users.push(user({ id: 2, username: "Other" }));
+		for (const userId of [1, 1, 2]) {
+			await persistRefreshToken(repository, await createRefreshToken(userId, config), userId);
+		}
+		const app = authApp(repository);
+		const authorization = `Bearer ${await createAccessToken(1, "admin", config)}`;
+		const response = await request(app).post("/api/auth/change-password").set("Authorization", authorization)
+			.send({ current_password: "OriginalPassword42", new_password: "ReplacementPassword42" })
+			.expect(200, { detail: "Password changed. Please log in again." });
+		expect(response.headers["set-cookie"]).toBeUndefined();
+		await expect(verifyPassword("ReplacementPassword42", repository.users[0].password_hash)).resolves.toBe(true);
+		await expect(verifyPassword("OriginalPassword42", repository.users[0].password_hash)).resolves.toBe(false);
+		expect(repository.refreshTokens.map((token) => token.isRevoked)).toEqual([true, true, false]);
+		expect(repository.audits).toEqual([{ userId: 1, action: "password_change", details: {}, ipAddress: expect.any(String) }]);
+		expect(JSON.stringify(repository.audits)).not.toContain("Password42");
+		await request(app).get("/api/auth/me").set("Authorization", authorization).expect(200);
+	});
+
+	it("rejects wrong current passwords and malformed stored hashes without mutation", async () => {
+		const authorization = `Bearer ${await createAccessToken(1, "admin", config)}`;
+		for (const hash of [await hashPassword("OriginalPassword42"), "$2b$malformed"]) {
+			repository.users[0].password_hash = hash;
+			await request(authApp(repository)).post("/api/auth/change-password").set("Authorization", authorization)
+				.send({ current_password: "wrong", new_password: "ReplacementPassword42" })
+				.expect(400, { detail: "Current password is incorrect" });
+			expect(repository.users[0].password_hash).toBe(hash);
+			expect(repository.audits).toHaveLength(0);
+		}
+	});
+
+	it("forwards account database failures to Express's generic error handler", async () => {
+		repository.users[0].password_hash = await hashPassword("OriginalPassword42");
+		const failure = vi.spyOn(repository, "changePassword").mockRejectedValue(new Error("test database failure"));
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		try {
+			const response = await request(authApp(repository)).post("/api/auth/change-password")
+				.set("Authorization", `Bearer ${await createAccessToken(1, "admin", config)}`)
+				.send({ current_password: "OriginalPassword42", new_password: "ReplacementPassword42" })
+				.expect(500, { error: "Internal Server Error", message: "An unexpected error occurred." });
+			expect(response.headers["set-cookie"]).toBeUndefined();
+			await expect(verifyPassword("OriginalPassword42", repository.users[0].password_hash)).resolves.toBe(true);
+			expect(repository.audits).toHaveLength(0);
+		} finally {
+			failure.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it.each([
+		{}, { current_password: "original" }, { new_password: "valid-password" },
+		{ current_password: 1, new_password: "valid-password" },
+		{ current_password: null, new_password: "valid-password" },
+		{ current_password: "original", new_password: null },
+		{ current_password: "original", new_password: {} },
+		{ current_password: "original", new_password: "short" },
+	])("rejects invalid password-change fields: %j", async (body) => {
+		await request(authApp(repository)).post("/api/auth/change-password")
+			.set("Authorization", `Bearer ${await createAccessToken(1, "admin", config)}`)
+			.send(body).expect(422);
+		expect(repository.users[0].password_hash).toBe("not-a-valid-password-hash");
+	});
+
+	it("sets only the authenticated user's PIN and keeps refresh sessions valid", async () => {
+		repository.users.push(user({ id: 2, username: "Other" }));
+		await persistRefreshToken(repository, await createRefreshToken(1, config));
+		const response = await request(authApp(repository)).post("/api/auth/set-pin")
+			.set("Authorization", `Bearer ${await createAccessToken(1, "admin", config)}`)
+			.send({ pin: "012345", user_id: 2 }).expect(200, { detail: "PIN set successfully" });
+		expect(response.headers["set-cookie"]).toBeUndefined();
+		expect(repository.users[0].pin_hash).not.toBe("012345");
+		await expect(verifyPin("012345", repository.users[0].pin_hash!)).resolves.toBe(true);
+		expect(repository.users[1].pin_hash).toBeNull();
+		expect(repository.refreshTokens[0].isRevoked).toBe(false);
+		expect(repository.audits).toHaveLength(0);
+	});
+
+	it.each([{}, { pin: null }, { pin: 123456 }, { pin: [] },
+		{ pin: "12345" }, { pin: "1234567" }, { pin: "12345a" }, { pin: "１２３４５６" },
+	])("rejects invalid PIN fields: %j", async (body) => {
+		await request(authApp(repository)).post("/api/auth/set-pin")
+			.set("Authorization", `Bearer ${await createAccessToken(1, "admin", config)}`)
+			.send(body).expect(422);
+		expect(repository.users[0].pin_hash).toBeNull();
 	});
 });
