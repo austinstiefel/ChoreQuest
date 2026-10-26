@@ -9,6 +9,7 @@ import {
 } from "../auth/tokens.js";
 import type { AuthConfig } from "../config/auth.js";
 import { sqliteDate, sqliteTimestamp } from "../db/legacySqlite.js";
+import { mergeAvatarConfig } from "../db/avatarConfig.js";
 import {
 	createAuthenticateRequest,
 	createPrismaAuthUserRepository,
@@ -306,16 +307,26 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 
 		async updateProfile(input) {
 			// Null and omitted values both preserve existing fields, as in Python.
-			// A single parameterized statement also handles the legacy JSON column.
-			await prisma.$executeRaw`
+			// Serialize with Phase 4 pet awards/interactions; otherwise this second
+			// avatar-writing endpoint could erase XP or reset the daily budget.
+			await prisma.$transaction(async tx => {
+				await tx.$executeRaw`UPDATE users SET id = id WHERE 0`;
+				let avatarConfig = input.avatarConfig;
+				if (avatarConfig !== undefined) {
+					const [row] = await tx.$queryRaw<Array<{ config: string | null }>>`SELECT CAST(avatar_config AS TEXT) AS config FROM users WHERE id = ${input.userId}`;
+					const existing = row?.config ? JSON.parse(row.config) as Record<string, unknown> : {};
+					avatarConfig = mergeAvatarConfig(existing, avatarConfig);
+				}
+				await tx.$executeRaw`
         UPDATE users
         SET display_name = COALESCE(${input.displayName ?? null}, display_name),
-          avatar_config = CASE WHEN ${input.avatarConfig !== undefined}
-            THEN ${input.avatarConfig === undefined ? null : JSON.stringify(input.avatarConfig)}
+          avatar_config = CASE WHEN ${avatarConfig !== undefined}
+            THEN ${avatarConfig === undefined ? null : JSON.stringify(avatarConfig)}
             ELSE avatar_config END,
           updated_at = ${sqliteTimestamp()}
         WHERE id = ${input.userId}
       `;
+			});
 		},
 
 		async changePassword(input) {

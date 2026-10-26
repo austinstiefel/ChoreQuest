@@ -7,7 +7,7 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { notFoundHandler } from "./middleware/notFound.js";
 import { healthRouter } from "./routes/health.js";
 
-export function createApp(authRouter?: Router, authConfig?: Pick<AuthConfig, "corsOrigins">, adminRouter?: Router) {
+export function createApp(authRouter?: Router, authConfig?: Pick<AuthConfig, "corsOrigins">, adminRouter?: Router, businessRouter?: Router) {
 	const app = express();
 	const corsOrigins = authConfig?.corsOrigins ?? [];
 
@@ -34,6 +34,9 @@ export function createApp(authRouter?: Router, authConfig?: Pick<AuthConfig, "co
 
 	app.use("/api/health", healthRouter);
 	if (authRouter !== undefined) app.use("/api/auth", authRouter);
+	// Settings retain their reference parent/authenticated permissions and must
+	// be matched before the Phase 3 admin router's admin-only middleware.
+	if (businessRouter !== undefined) app.use(businessRouter);
 	if (adminRouter !== undefined) app.use("/api/admin", adminRouter);
 
 	app.use(notFoundHandler);
