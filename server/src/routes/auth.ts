@@ -8,6 +8,7 @@ import {
 	decodeRefreshToken,
 } from "../auth/tokens.js";
 import type { AuthConfig } from "../config/auth.js";
+import { sqliteDate, sqliteTimestamp } from "../db/legacySqlite.js";
 import {
 	createAuthenticateRequest,
 	createPrismaAuthUserRepository,
@@ -62,6 +63,8 @@ export interface AuthRepository extends AuthUserRepository {
 		userId: number;
 		tokenHash: string;
 		expiresAt: Date;
+		expectedPasswordHash?: string;
+		expectedPinHash?: string;
 	}): Promise<void>;
 	findRefreshTokenByHash(tokenHash: string): Promise<RefreshTokenRecord | null>;
 	findActiveUserById(userId: number): Promise<AuthUserRecord | null>;
@@ -79,9 +82,10 @@ export interface AuthRepository extends AuthUserRepository {
 	}): Promise<void>;
 	changePassword(input: {
 		userId: number;
+		expectedPasswordHash: string;
 		passwordHash: string;
 		ipAddress: string | null;
-	}): Promise<void>;
+	}): Promise<boolean>;
 	setPin(input: { userId: number; pinHash: string }): Promise<void>;
 }
 
@@ -112,9 +116,13 @@ export class SlidingWindowRateLimiter implements AuthRateLimiter {
 	}
 }
 
-type RawUserRecord = Omit<AuthUserRecord, "avatar_config"> & { avatar_config: unknown | null };
+export type RawUserRecord = Omit<AuthUserRecord, "avatar_config" | "created_at"> & {
+	avatar_config: unknown | null;
+	created_at: Date | string | number;
+};
 
 class InitialSetupUnavailableError extends Error {}
+export class StaleCredentialsError extends Error {}
 
 function parseAvatarConfig(value: unknown): unknown | null {
 	if (value === null || value === undefined) return null;
@@ -122,17 +130,19 @@ function parseAvatarConfig(value: unknown): unknown | null {
 	return value;
 }
 
-function toAuthUserRecord(user: RawUserRecord): AuthUserRecord {
+export function toAuthUserRecord(user: RawUserRecord): AuthUserRecord {
 	return {
 		...user,
 		avatar_config: parseAvatarConfig(user.avatar_config),
+		created_at: sqliteDate(user.created_at),
 	};
 }
 
 /**
  * Build the persistence adapter for the existing SQLite schema. Prisma marks
  * the legacy JSON columns as Unsupported, so user reads and audit JSON writes
- * use parameterized SQL while all other access uses the generated client.
+ * use parameterized SQL. Timestamp writes also use SQLAlchemy-compatible UTC
+ * text, rather than Prisma's epoch milliseconds. Typed reads select no dates.
  */
 export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository {
 	return {
@@ -141,7 +151,7 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 			const rows = await prisma.$queryRaw<RawUserRecord[]>`
         SELECT id, username, display_name, password_hash, pin_hash, role,
           points_balance, total_points_earned, current_streak, longest_streak,
-          streak_freezes_used, streak_freeze_month, avatar_config, is_active, created_at
+          streak_freezes_used, streak_freeze_month, CAST(avatar_config AS TEXT) AS avatar_config, is_active, CAST(created_at AS TEXT) AS created_at
         FROM users
         WHERE role = ${"admin"} AND is_active = ${true}
         ORDER BY id
@@ -154,7 +164,7 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 			const rows = await prisma.$queryRaw<RawUserRecord[]>`
         SELECT id, username, display_name, password_hash, pin_hash, role,
           points_balance, total_points_earned, current_streak, longest_streak,
-          streak_freezes_used, streak_freeze_month, avatar_config, is_active, created_at
+          streak_freezes_used, streak_freeze_month, CAST(avatar_config AS TEXT) AS avatar_config, is_active, CAST(created_at AS TEXT) AS created_at
         FROM users
         WHERE role = ${"admin"} AND is_active = ${true}
         ORDER BY id
@@ -174,7 +184,7 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 			const rows = await prisma.$queryRaw<RawUserRecord[]>`
         SELECT id, username, display_name, password_hash, pin_hash, role,
           points_balance, total_points_earned, current_streak, longest_streak,
-          streak_freezes_used, streak_freeze_month, avatar_config, is_active, created_at
+          streak_freezes_used, streak_freeze_month, CAST(avatar_config AS TEXT) AS avatar_config, is_active, CAST(created_at AS TEXT) AS created_at
         FROM users
         WHERE username = ${username}
         LIMIT 1
@@ -185,23 +195,18 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 		async completeInitialPasswordSetup(input) {
 			try {
 				return await prisma.$transaction(async (tx) => {
-					const now = new Date();
-					const transition = await tx.app_settings.updateMany({
-						where: { key: SETUP_COMPLETE_KEY, value: "false" },
-						data: { value: "true", updated_at: now },
-					});
-					if (transition.count !== 1) throw new InitialSetupUnavailableError();
+					const now = sqliteTimestamp();
+					const transition = await tx.$executeRaw`UPDATE app_settings SET value = 'true', updated_at = ${now}
+            WHERE key = ${SETUP_COMPLETE_KEY} AND value = 'false'`;
+					if (transition !== 1) throw new InitialSetupUnavailableError();
+					const admins = await tx.users.findMany({ where: { role: "admin", is_active: true }, select: { id: true } });
+					if (admins.length !== 1 || admins[0].id !== input.userId) throw new InitialSetupUnavailableError();
 
-					const passwordSetup = await tx.app_settings.updateMany({
-						where: { key: INITIAL_PASSWORD_SETUP_REQUIRED_KEY, value: "true" },
-						data: { value: "false", updated_at: now },
-					});
-					if (passwordSetup.count !== 1) throw new InitialSetupUnavailableError();
+					const passwordSetup = await tx.$executeRaw`UPDATE app_settings SET value = 'false', updated_at = ${now}
+            WHERE key = ${INITIAL_PASSWORD_SETUP_REQUIRED_KEY} AND value = 'true'`;
+					if (passwordSetup !== 1) throw new InitialSetupUnavailableError();
 
-					await tx.users.update({
-						where: { id: input.userId },
-						data: { password_hash: input.passwordHash, updated_at: now },
-					});
+					await tx.$executeRaw`UPDATE users SET password_hash = ${input.passwordHash}, updated_at = ${now} WHERE id = ${input.userId}`;
 					await tx.$executeRaw`
             INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
             VALUES (${input.userId}, ${"initial_password_setup"}, ${"{}"}, ${input.ipAddress}, ${now})
@@ -216,22 +221,20 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 
 		async recordPasswordLogin(input) {
 			await prisma.$transaction(async (tx) => {
-				const now = new Date();
+				const now = sqliteTimestamp();
 				await tx.$executeRaw`
           INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
           VALUES (${input.userId}, ${"login"}, ${'{"method":"password"}'}, ${input.ipAddress}, ${now})
         `;
 				if (input.isAdmin) {
-					await tx.app_settings.updateMany({
-						where: { key: SETUP_COMPLETE_KEY, value: "false" },
-						data: { value: "true", updated_at: now },
-					});
+					await tx.$executeRaw`UPDATE app_settings SET value = 'true', updated_at = ${now}
+            WHERE key = ${SETUP_COMPLETE_KEY} AND value = 'false'`;
 				}
 			});
 		},
 
 		async recordPinLogin(input) {
-			const now = new Date();
+			const now = sqliteTimestamp();
 			await prisma.$executeRaw`
         INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
         VALUES (${input.userId}, ${"login"}, ${'{"method":"pin"}'}, ${input.ipAddress}, ${now})
@@ -239,14 +242,14 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 		},
 
 		async storeRefreshToken(input) {
-			await prisma.refresh_tokens.create({
-				data: {
-					user_id: input.userId,
-					token_hash: input.tokenHash,
-					is_revoked: false,
-					expires_at: input.expiresAt,
-					created_at: new Date(),
-				},
+			await prisma.$transaction(async (tx) => {
+				await tx.$executeRaw`UPDATE users SET id = id WHERE 0`;
+				const current = await tx.users.findFirst({ where: {
+					id: input.userId, is_active: true, password_hash: input.expectedPasswordHash, pin_hash: input.expectedPinHash,
+				}, select: { id: true } });
+				if (current === null) throw new StaleCredentialsError();
+				await tx.$executeRaw`INSERT INTO refresh_tokens (user_id, token_hash, is_revoked, expires_at, created_at)
+          VALUES (${input.userId}, ${input.tokenHash}, 0, ${sqliteTimestamp(input.expiresAt)}, ${sqliteTimestamp()})`;
 			});
 		},
 
@@ -261,7 +264,7 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 			const rows = await prisma.$queryRaw<RawUserRecord[]>`
         SELECT id, username, display_name, password_hash, pin_hash, role,
           points_balance, total_points_earned, current_streak, longest_streak,
-          streak_freezes_used, streak_freeze_month, avatar_config, is_active, created_at
+          streak_freezes_used, streak_freeze_month, CAST(avatar_config AS TEXT) AS avatar_config, is_active, CAST(created_at AS TEXT) AS created_at
         FROM users
         WHERE id = ${userId} AND is_active = ${true}
         LIMIT 1
@@ -280,15 +283,9 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
 					data: { is_revoked: true },
 				});
 				if (revoked.count === 1) {
-					await tx.refresh_tokens.create({
-						data: {
-							user_id: input.userId,
-							token_hash: input.replacementTokenHash,
-							is_revoked: false,
-							expires_at: input.replacementExpiresAt,
-							created_at: new Date(),
-						},
-					});
+					await tx.$executeRaw`INSERT INTO refresh_tokens (user_id, token_hash, is_revoked, expires_at, created_at)
+            VALUES (${input.userId}, ${input.replacementTokenHash}, 0,
+              ${sqliteTimestamp(input.replacementExpiresAt)}, ${sqliteTimestamp()})`;
 					return "rotated";
 				}
 
@@ -316,18 +313,17 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
           avatar_config = CASE WHEN ${input.avatarConfig !== undefined}
             THEN ${input.avatarConfig === undefined ? null : JSON.stringify(input.avatarConfig)}
             ELSE avatar_config END,
-          updated_at = ${new Date()}
+          updated_at = ${sqliteTimestamp()}
         WHERE id = ${input.userId}
       `;
 		},
 
 		async changePassword(input) {
-			await prisma.$transaction(async (tx) => {
-				const now = new Date();
-				await tx.users.update({
-					where: { id: input.userId },
-					data: { password_hash: input.passwordHash, updated_at: now },
-				});
+			return prisma.$transaction(async (tx) => {
+				const now = sqliteTimestamp();
+				const changed = await tx.$executeRaw`UPDATE users SET password_hash = ${input.passwordHash}, updated_at = ${now}
+          WHERE id = ${input.userId} AND password_hash = ${input.expectedPasswordHash} AND is_active = 1`;
+				if (changed !== 1) return false;
 				await tx.refresh_tokens.updateMany({
 					where: { user_id: input.userId, is_revoked: false },
 					data: { is_revoked: true },
@@ -336,14 +332,12 @@ export function createPrismaAuthRepository(prisma: PrismaClient): AuthRepository
           INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
           VALUES (${input.userId}, ${"password_change"}, ${"{}"}, ${input.ipAddress}, ${now})
         `;
+				return true;
 			});
 		},
 
 		async setPin(input) {
-			await prisma.users.update({
-				where: { id: input.userId },
-				data: { pin_hash: input.pinHash, updated_at: new Date() },
-			});
+			await prisma.$executeRaw`UPDATE users SET pin_hash = ${input.pinHash}, updated_at = ${sqliteTimestamp()} WHERE id = ${input.userId}`;
 		},
 	};
 }
@@ -358,41 +352,43 @@ function sendRateLimited(response: Response, retryAfter: number | undefined): bo
 	return true;
 }
 
-function validationError(
-	response: Response,
-	field: string,
-	message: string,
-	type: string,
-	context?: Record<string, unknown>,
-): void {
-	// FastAPI returns 422 for request-model validation. Deliberately omit its
-	// echo of `input` so passwords and PINs are never reflected to the client.
-	response.status(422).json({
-		detail: [{ type, loc: ["body", field], msg: message, ...(context === undefined ? {} : { ctx: context }) }],
-	});
-}
-
-function stringField(body: unknown, field: string): string | null {
-	if (typeof body !== "object" || body === null) return null;
-	const value = (body as Record<string, unknown>)[field];
-	return typeof value === "string" ? value : null;
-}
-
-interface AccountFieldRule {
-	type: "string" | "dict";
+export interface AccountFieldRule {
+	type: "string" | "dict" | "bool" | "int" | "datetime" | "strings";
 	optional?: boolean;
+	nullable?: boolean;
+	defaultValue?: unknown;
 	minLength?: number;
 	maxLength?: number;
 	pattern?: RegExp;
+	choices?: string[];
+}
+
+function accountDateTime(value: unknown): Date | null {
+	const pythonDate = (date: Date) => Number.isNaN(date.getTime()) || date.getUTCFullYear() < 1 || date.getUTCFullYear() > 9999 ? null : date;
+	if (typeof value === "number" || (typeof value === "string" && /^[+-]?\d+(?:\.\d+)?$/.test(value))) {
+		const timestamp = Number(value);
+		const date = new Date(timestamp * (Math.abs(timestamp) <= 20_000_000_000 ? 1000 : 1));
+		return pythonDate(date);
+	}
+	if (typeof value !== "string") return null;
+	const parts = /^(\d{4})-(\d{2})-(\d{2})(?:[Tt _](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?([Zz]|[+-]\d{2}:?\d{2})?)?$/.exec(value);
+	if (parts === null) return null;
+	const [year, month, day] = parts.slice(1, 4).map(Number);
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	if (month < 1 || month > 12 || day < 1 || day > days[month - 1] || Number(parts[4] ?? 0) > 23 || Number(parts[5] ?? 0) > 59 || Number(parts[6] ?? 0) > 59) return null;
+	const normalized = value.replace(/[Tt _]/, "T");
+	const date = new Date(normalized + (parts[4] !== undefined && parts[7] === undefined ? "Z" : ""));
+	return pythonDate(date);
 }
 
 /** Pydantic-style account validation; extra fields are ignored, inputs are not echoed. */
-function accountBody(
+export function accountBody(
 	body: unknown,
 	response: Response,
 	rules: Record<string, AccountFieldRule>,
 ): Record<string, unknown> | null {
-	if (body === undefined) {
+	if (body === undefined || body === null) {
 		response.status(422).json({ detail: [{ type: "missing", loc: ["body"], msg: "Field required" }] });
 		return null;
 	}
@@ -404,23 +400,48 @@ function accountBody(
 		}] });
 		return null;
 	}
-	const values = body as Record<string, unknown>;
+	const values = { ...body } as Record<string, unknown>;
 	const errors: Array<{
 		type: string;
-		loc: string[];
+		loc: Array<string | number>;
 		msg: string;
 		ctx?: Record<string, unknown>;
 	}> = [];
 	for (const [field, rule] of Object.entries(rules)) {
 		const value = values[field];
 		const loc = ["body", field];
-		if (rule.optional && (value === undefined || value === null)) continue;
+		if (value === undefined && rule.defaultValue !== undefined) {
+			values[field] = structuredClone(rule.defaultValue);
+			continue;
+		}
+		if ((rule.optional && value === undefined) || (rule.nullable && value === null)) continue;
 		if (value === undefined) {
 			errors.push({ type: "missing", loc, msg: "Field required" });
+		} else if (rule.type === "bool") {
+			const text = typeof value === "string" ? value.toLowerCase() : value;
+			if ([true, 1, "true", "1", "yes", "y", "on", "t"].includes(text as string)) values[field] = true;
+			else if ([false, 0, "false", "0", "no", "n", "off", "f"].includes(text as string)) values[field] = false;
+			else errors.push({ type: "bool_parsing", loc, msg: "Input should be a valid boolean, unable to interpret input" });
+		} else if (rule.type === "int") {
+			const parsed = typeof value === "boolean" ? Number(value) : typeof value === "string" && /^\s*[+-]?\d+(?:\.0+)?\s*$/.test(value) ? Number(value) : value;
+			if (typeof parsed !== "number" || !Number.isSafeInteger(parsed)) errors.push({ type: "int_parsing", loc, msg: "Input should be a valid integer, unable to parse string as an integer" });
+			else values[field] = parsed;
+		} else if (rule.type === "datetime") {
+			const date = accountDateTime(value);
+			if (date === null) errors.push({ type: "datetime_from_date_parsing", loc, msg: "Input should be a valid datetime or date, invalid input" });
+			else values[field] = date;
+		} else if (rule.type === "strings") {
+			if (!Array.isArray(value)) errors.push({ type: "list_type", loc, msg: "Input should be a valid list" });
+			else value.forEach((entry, index) => {
+				if (typeof entry !== "string") errors.push({ type: "string_type", loc: [...loc, index], msg: "Input should be a valid string" });
+			});
 		} else if (rule.type === "dict") {
 			if (typeof value !== "object" || value === null || Array.isArray(value)) {
 				errors.push({ type: "dict_type", loc, msg: "Input should be a valid dictionary" });
 			}
+		} else if (rule.choices !== undefined && (typeof value !== "string" || !rule.choices.includes(value))) {
+			const expected = "'admin', 'parent' or 'kid'";
+			errors.push({ type: "enum", loc, msg: `Input should be ${expected}`, ctx: { expected } });
 		} else if (typeof value !== "string") {
 			errors.push({ type: "string_type", loc, msg: "Input should be a valid string" });
 		} else {
@@ -447,7 +468,7 @@ function accountBody(
 	return values;
 }
 
-function userResponse(user: AuthUserRecord) {
+export function userResponse(user: AuthUserRecord) {
 	return {
 		id: user.id,
 		username: user.username,
@@ -496,12 +517,17 @@ function clearRefreshCookie(response: Response, config: AuthConfig): void {
 function refreshTokenFromCookie(request: Request): string | null {
 	const cookieHeader = request.get("Cookie");
 	if (cookieHeader === undefined) return null;
-
+	let token: string | null = null;
 	for (const segment of cookieHeader.split(";")) {
 		const [name, ...value] = segment.trim().split("=");
-		if (name === REFRESH_COOKIE_NAME) return value.join("=") || null;
+		if (name === REFRESH_COOKIE_NAME) {
+			const raw = value.join("=").trim();
+			// Starlette accepts quoted cookie values and uses the last duplicate.
+			// JWTs contain no escaped characters, so only the quotes need removing.
+			token = (raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw) || null;
+		}
 	}
-	return null;
+	return token;
 }
 
 function parseTokenSubject(subject: string): number | null {
@@ -515,17 +541,26 @@ async function issueTokens(
 	repository: AuthRepository,
 	config: AuthConfig,
 	response: Response,
+	credential: "password" | "pin" = "password",
 ): Promise<void> {
 	const accessToken = await createAccessToken(user.id, user.role, config);
 	const refreshToken = await createRefreshToken(user.id, config);
 	const refreshPayload = await decodeRefreshToken(refreshToken, config);
 	if (refreshPayload === null) throw new Error("Unable to create refresh token");
 
-	await repository.storeRefreshToken({
-		userId: user.id,
-		tokenHash: createHash("sha256").update(refreshToken).digest("hex"),
-		expiresAt: new Date(refreshPayload.exp * 1000),
-	});
+	try {
+		await repository.storeRefreshToken({
+			userId: user.id,
+			tokenHash: createHash("sha256").update(refreshToken).digest("hex"),
+			expiresAt: new Date(refreshPayload.exp * 1000),
+			expectedPasswordHash: user.password_hash,
+			...(credential === "pin" && user.pin_hash !== null ? { expectedPinHash: user.pin_hash } : {}),
+		});
+	} catch (error) {
+		if (!(error instanceof StaleCredentialsError)) throw error;
+		response.status(401).json({ detail: credential === "pin" ? "Invalid username or PIN" : "Invalid username or password" });
+		return;
+	}
 
 	setRefreshCookie(response, refreshToken, config);
 	response.json({ access_token: accessToken, user: userResponse(user) });
@@ -576,24 +611,12 @@ export function createAuthRouter(input: {
 
 	router.post("/setup-password", async (request, response, next) => {
 		try {
-			const password = stringField(request.body, "password");
-			const confirmation = stringField(request.body, "confirm_password");
-			if (password === null) {
-				validationError(response, "password", "Field required", "missing");
-				return;
-			}
-			if (password.length < 6) {
-				validationError(response, "password", "String should have at least 6 characters", "string_too_short", { min_length: 6 });
-				return;
-			}
-			if (confirmation === null) {
-				validationError(response, "confirm_password", "Field required", "missing");
-				return;
-			}
-			if (confirmation.length < 6) {
-				validationError(response, "confirm_password", "String should have at least 6 characters", "string_too_short", { min_length: 6 });
-				return;
-			}
+			const body = accountBody(request.body, response, {
+				password: { type: "string", minLength: 6 }, confirm_password: { type: "string", minLength: 6 },
+			});
+			if (body === null) return;
+			const password = body.password as string;
+			const confirmation = body.confirm_password as string;
 			if (sendRateLimited(response, rateLimiter.check(`setup-password:${clientAddress(request)}`, 5, 900))) return;
 			if (password !== confirmation) {
 				response.status(400).json({ detail: "Passwords do not match" });
@@ -615,9 +638,10 @@ export function createAuthRouter(input: {
 			}
 
 			const admin = admins[0];
+			const passwordHash = await hashPassword(password);
 			const completed = await input.repository.completeInitialPasswordSetup({
 				userId: admin.id,
-				passwordHash: await hashPassword(password),
+				passwordHash,
 				ipAddress: clientAddress(request),
 			});
 			if (!completed) {
@@ -625,7 +649,7 @@ export function createAuthRouter(input: {
 				return;
 			}
 
-			await issueTokens(admin, input.repository, input.config, response);
+			await issueTokens({ ...admin, password_hash: passwordHash }, input.repository, input.config, response);
 		} catch (error) {
 			next(error);
 		}
@@ -633,16 +657,10 @@ export function createAuthRouter(input: {
 
 	router.post("/login", async (request, response, next) => {
 		try {
-			const username = stringField(request.body, "username");
-			const password = stringField(request.body, "password");
-			if (username === null) {
-				validationError(response, "username", "Field required", "missing");
-				return;
-			}
-			if (password === null) {
-				validationError(response, "password", "Field required", "missing");
-				return;
-			}
+			const body = accountBody(request.body, response, { username: { type: "string" }, password: { type: "string" } });
+			if (body === null) return;
+			const username = body.username as string;
+			const password = body.password as string;
 			if (sendRateLimited(response, rateLimiter.check(`login:${clientAddress(request)}`, 10, 300))) return;
 
 			const user = await input.repository.findUserByUsername(username);
@@ -668,20 +686,12 @@ export function createAuthRouter(input: {
 
 	router.post("/pin-login", async (request, response, next) => {
 		try {
-			const username = stringField(request.body, "username");
-			const pin = stringField(request.body, "pin");
-			if (username === null) {
-				validationError(response, "username", "Field required", "missing");
-				return;
-			}
-			if (pin === null) {
-				validationError(response, "pin", "Field required", "missing");
-				return;
-			}
-			if (!/^[0-9]{6}$/.test(pin)) {
-				validationError(response, "pin", "String should match pattern '^\\d{6}$'", "string_pattern_mismatch", { pattern: "^\\d{6}$" });
-				return;
-			}
+			const body = accountBody(request.body, response, {
+				username: { type: "string" }, pin: { type: "string", minLength: 6, maxLength: 6, pattern: /^[0-9]{6}$/ },
+			});
+			if (body === null) return;
+			const username = body.username as string;
+			const pin = body.pin as string;
 			if (sendRateLimited(response, rateLimiter.check(`pin:${clientAddress(request)}`, 5, 900))) return;
 
 			const user = await input.repository.findUserByUsername(username);
@@ -695,7 +705,7 @@ export function createAuthRouter(input: {
 			}
 
 			await input.repository.recordPinLogin({ userId: user.id, ipAddress: clientAddress(request) });
-			await issueTokens(user, input.repository, input.config, response);
+			await issueTokens(user, input.repository, input.config, response, "pin");
 		} catch (error) {
 			next(error);
 		}
@@ -725,6 +735,11 @@ export function createAuthRouter(input: {
 			if (stored.is_revoked) {
 				clearRefreshCookie(response, input.config);
 				response.status(401).json({ detail: "Refresh token already used" });
+				return;
+			}
+			if (stored.user_id !== userId) {
+				clearRefreshCookie(response, input.config);
+				response.status(401).json({ detail: "Invalid or expired refresh token" });
 				return;
 			}
 
@@ -785,8 +800,8 @@ export function createAuthRouter(input: {
 
 	router.put("/me", authenticate, async (request, response) => {
 		const body = accountBody(request.body, response, {
-			display_name: { type: "string", optional: true, maxLength: 10 },
-			avatar_config: { type: "dict", optional: true },
+			display_name: { type: "string", optional: true, nullable: true, maxLength: 10 },
+			avatar_config: { type: "dict", optional: true, nullable: true },
 		});
 		if (body === null) return;
 		const user = await currentAccount(request, response);
@@ -812,11 +827,16 @@ export function createAuthRouter(input: {
 			response.status(400).json({ detail: "Current password is incorrect" });
 			return;
 		}
-		await input.repository.changePassword({
+		const changed = await input.repository.changePassword({
 			userId: user.id,
+			expectedPasswordHash: user.password_hash,
 			passwordHash: await hashPassword(body.new_password as string),
 			ipAddress: clientAddress(request),
 		});
+		if (!changed) {
+			response.status(400).json({ detail: "Current password is incorrect" });
+			return;
+		}
 		response.json({ detail: "Password changed. Please log in again." });
 	});
 

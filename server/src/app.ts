@@ -7,7 +7,7 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { notFoundHandler } from "./middleware/notFound.js";
 import { healthRouter } from "./routes/health.js";
 
-export function createApp(authRouter?: Router, authConfig?: Pick<AuthConfig, "corsOrigins">) {
+export function createApp(authRouter?: Router, authConfig?: Pick<AuthConfig, "corsOrigins">, adminRouter?: Router) {
 	const app = express();
 	const corsOrigins = authConfig?.corsOrigins ?? [];
 
@@ -26,13 +26,15 @@ export function createApp(authRouter?: Router, authConfig?: Pick<AuthConfig, "co
 			callback(null, {
 				origin: allowed ? requestOrigin : false,
 				credentials: allowed,
+				methods: ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
 			});
 		}),
 	);
-	app.use(express.json({ limit: "1mb" }));
+	app.use(express.json({ limit: "1mb", strict: false }));
 
 	app.use("/api/health", healthRouter);
 	if (authRouter !== undefined) app.use("/api/auth", authRouter);
+	if (adminRouter !== undefined) app.use("/api/admin", adminRouter);
 
 	app.use(notFoundHandler);
 	app.use(errorHandler);

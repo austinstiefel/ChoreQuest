@@ -24,5 +24,5 @@ export function hashPin(pin: string): Promise<string> {
 }
 
 export function verifyPin(pin: string, pinHash: string): Promise<boolean> {
-	return bcrypt.compare(pin, pinHash);
+	return verifyPassword(pin, pinHash);
 }

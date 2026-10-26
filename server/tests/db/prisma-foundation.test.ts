@@ -1,35 +1,29 @@
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaAuthRepository } from "../../src/routes/auth.js";
 import { hashPassword, hashPin, verifyPassword, verifyPin } from "../../src/auth/passwords.js";
-
-const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../");
-const sourceDatabase = resolve(repositoryRoot, "data/chores_os.db");
-
-function sqliteUrl(path: string): string {
-  return `file:${path.replaceAll("\\", "/")}`;
-}
+import { newUserData } from "../../src/auth/accounts.js";
+import { disposableDatabase } from "../helpers/sqlite.js";
 
 describe("Prisma SQLite foundation", () => {
-  let temporaryDirectory: string;
-  let databasePath: string;
+  let database: Awaited<ReturnType<typeof disposableDatabase>>;
   let prisma: import("@prisma/client").PrismaClient;
 
   beforeAll(async () => {
-    temporaryDirectory = await mkdtemp(resolve(tmpdir(), "chorequest-prisma-"));
-    databasePath = resolve(temporaryDirectory, "chores_os.db");
-    await copyFile(sourceDatabase, databasePath);
-
-    process.env.DATABASE_URL = sqliteUrl(databasePath);
-    ({ prisma } = await import("../../src/db/prisma.js"));
-
-    // The source database currently has this disabled. Enable it only on the
-    // disposable copy so the target runtime's integrity behavior is tested.
-    await prisma.$executeRawUnsafe("PRAGMA foreign_keys = ON");
+    database = await disposableDatabase();
+    prisma = database.prisma;
+    // Synthetic records only: this suite never reads/copies development data.
+    for (const username of ["FixtureOne", "FixtureTwo"]) {
+      await prisma.users.create({ data: newUserData({ username, displayName: username, passwordHash: "fixture-only-unusable", role: "kid" }) });
+    }
+    const category = await prisma.chore_categories.create({ data: {
+      name: "Fixture", icon: "star", colour: "blue", is_default: true, created_at: new Date(),
+    } });
+    await prisma.$executeRaw`INSERT INTO chores (title, points, difficulty, category_id, recurrence,
+      requires_photo, is_active, created_by, created_at, updated_at)
+      VALUES ('Fixture', 1, 'easy', ${category.id}, 'daily', 0, 1, 1, ${new Date()}, ${new Date()})`;
+    await prisma.$executeRaw`INSERT INTO achievements (key,title,description,icon,points_reward,criteria,sort_order,created_at)
+      VALUES ('fixture','Fixture','Fixture','star',0,'{}',0,${new Date()})`;
     const foreignKeys = await prisma.$queryRaw<Array<{ foreign_keys: bigint }>>`
       PRAGMA foreign_keys
     `;
@@ -37,8 +31,7 @@ describe("Prisma SQLite foundation", () => {
   });
 
   afterAll(async () => {
-    await prisma.$disconnect();
-    await rm(temporaryDirectory, { recursive: true, force: true });
+    await database.dispose();
   });
 
   it("accounts for all 28 existing tables and reads representative data", async () => {
@@ -252,6 +245,7 @@ describe("Prisma SQLite foundation", () => {
       const records = await prisma.refresh_tokens.findMany({
         where: { token_hash: { in: [oldHash, replacementHash] } },
         orderBy: { token_hash: "asc" },
+        select: { token_hash: true, is_revoked: true },
       });
       expect(records).toHaveLength(2);
       expect(records.find((record) => record.token_hash === oldHash)?.is_revoked).toBe(true);
@@ -315,7 +309,7 @@ describe("Prisma SQLite foundation", () => {
 
       const pinHash = await hashPin("012345");
       await repository.setPin({ userId: owner.id, pinHash });
-      const afterPin = await prisma.users.findUniqueOrThrow({ where: { id: owner.id } });
+      const afterPin = await prisma.users.findUniqueOrThrow({ where: { id: owner.id }, select: { pin_hash: true } });
       expect(afterPin.pin_hash).not.toBe("012345");
       await expect(verifyPin("012345", afterPin.pin_hash!)).resolves.toBe(true);
       expect(await prisma.refresh_tokens.count({ where: { user_id: owner.id, is_revoked: false } })).toBe(2);
@@ -329,14 +323,14 @@ describe("Prisma SQLite foundation", () => {
         BEGIN SELECT RAISE(ABORT, 'forced test audit failure'); END
       `);
       await expect(repository.changePassword({
-        userId: owner.id, passwordHash: replacementHash, ipAddress: "phase3d3-force-failure",
+        userId: owner.id, expectedPasswordHash: originalHash, passwordHash: replacementHash, ipAddress: "phase3d3-force-failure",
       })).rejects.toThrow();
-      expect((await prisma.users.findUniqueOrThrow({ where: { id: owner.id } })).password_hash).toBe(originalHash);
+      expect((await prisma.users.findUniqueOrThrow({ where: { id: owner.id }, select: { password_hash: true } })).password_hash).toBe(originalHash);
       expect(await prisma.refresh_tokens.count({ where: { user_id: owner.id, is_revoked: false } })).toBe(2);
       expect(await prisma.audit_logs.count({ where: { user_id: owner.id } })).toBe(0);
 
-      await repository.changePassword({ userId: owner.id, passwordHash: replacementHash, ipAddress: "127.0.0.1" });
-      const afterPassword = await prisma.users.findUniqueOrThrow({ where: { id: owner.id } });
+      await repository.changePassword({ userId: owner.id, expectedPasswordHash: originalHash, passwordHash: replacementHash, ipAddress: "127.0.0.1" });
+      const afterPassword = await prisma.users.findUniqueOrThrow({ where: { id: owner.id }, select: { password_hash: true } });
       await expect(verifyPassword("ReplacementTestPassword42", afterPassword.password_hash)).resolves.toBe(true);
       expect(await prisma.refresh_tokens.count({ where: { user_id: owner.id, is_revoked: true } })).toBe(2);
       expect(await prisma.refresh_tokens.count({ where: { user_id: other.id, is_revoked: false } })).toBe(1);

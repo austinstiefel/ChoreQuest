@@ -9,6 +9,7 @@ import {
 	createAuthenticateRequest,
 	requireAdmin,
 	requireParent,
+	requireKid,
 	type AuthenticatedUser,
 	type AuthUserRepository,
 } from "../../src/middleware/auth.js";
@@ -137,10 +138,17 @@ describe("database-backed authentication middleware", () => {
 		});
 		expect(JSON.stringify(response.body)).not.toContain(internalMessage);
 		expect(errorSpy).toHaveBeenCalled();
+		expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(internalMessage);
 	});
 });
 
 describe("role authorization middleware", () => {
+	it.each(["kid", "parent", "admin"])("matches Python requireKid for %s", async (role) => {
+		const response = await request(protectedApp(repository(user(role)), requireKid))
+			.get("/protected").set("Authorization", `Bearer ${await accessToken("admin")}`);
+		expect(response.status).toBe(role === "kid" ? 200 : 403);
+		if (role !== "kid") expect(response.body).toEqual({ detail: "Kid role required" });
+	});
 	it.each(["parent", "admin"])("permits %s through requireParent", async (role) => {
 		await request(protectedApp(repository(user(role)), requireParent))
 			.get("/protected")

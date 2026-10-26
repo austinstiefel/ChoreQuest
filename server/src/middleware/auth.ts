@@ -126,3 +126,14 @@ export const requireAdmin: RequestHandler = (req, res, next): void => {
 
 	next();
 };
+
+/** Equivalent to Python's require_kid dependency; only kid role is allowed. */
+export const requireKid: RequestHandler = (req, res, next): void => {
+	const user = authenticatedUserOrUnauthorized(req, res);
+	if (user === null) return;
+	if (user.role !== "kid") {
+		res.status(403).json({ detail: "Kid role required" });
+		return;
+	}
+	next();
+};

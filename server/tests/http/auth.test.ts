@@ -59,13 +59,15 @@ class InMemoryAuthRepository implements AuthRepository {
 		if (input.avatarConfig !== undefined) user.avatar_config = input.avatarConfig;
 	}
 
-	async changePassword(input: Parameters<AuthRepository["changePassword"]>[0]): Promise<void> {
+	async changePassword(input: Parameters<AuthRepository["changePassword"]>[0]): Promise<boolean> {
 		const user = this.users.find((candidate) => candidate.id === input.userId)!;
+		if (!user.is_active || user.password_hash !== input.expectedPasswordHash) return false;
 		user.password_hash = input.passwordHash;
 		for (const token of this.refreshTokens) {
 			if (token.userId === user.id) token.isRevoked = true;
 		}
 		this.audits.push({ userId: user.id, action: "password_change", details: {}, ipAddress: input.ipAddress });
+		return true;
 	}
 
 	async setPin(input: Parameters<AuthRepository["setPin"]>[0]): Promise<void> {
@@ -367,6 +369,7 @@ describe("public authentication endpoints", () => {
 		expect(JSON.stringify(repository.audits)).not.toContain("ConfiguredPassword42");
 		const refreshToken = /refresh_token=([^;]+)/.exec(response.headers["set-cookie"][0])?.[1];
 		expect(refreshToken).toBeDefined();
+		if (refreshToken === undefined) throw new Error("Missing refresh cookie");
 		expect(repository.refreshTokens[0].tokenHash).toBe(
 			createHash("sha256").update(refreshToken).digest("hex"),
 		);
@@ -474,6 +477,7 @@ describe("public authentication endpoints", () => {
 	it("rejects missing, invalid, expired, malformed, and wrong-type refresh tokens", async () => {
 		const app = authApp(repository);
 		await request(app).post("/api/auth/refresh").expect(401, { detail: "No refresh token" });
+		await request(app).post("/api/auth/refresh").set("Cookie", 'refresh_token=""').expect(401, { detail: "No refresh token" });
 
 		const expired = await new SignJWT({ type: "refresh", exp: 1 })
 			.setProtectedHeader({ alg: "HS256", typ: "JWT" })
@@ -533,7 +537,7 @@ describe("public authentication endpoints", () => {
 		await persistRefreshToken(repository, original);
 		const response = await request(authApp(repository))
 			.post("/api/auth/refresh")
-			.set("Cookie", refreshCookie(original))
+			.set("Cookie", `refresh_token=ignored-duplicate; refresh_token="${original}"`)
 			.expect(200);
 
 		expect(response.body.user).toMatchObject({ id: 1, username: "Admin", role: "admin" });
@@ -543,6 +547,7 @@ describe("public authentication endpoints", () => {
 		});
 		const replacement = /refresh_token=([^;]+)/.exec(response.headers["set-cookie"][0])?.[1];
 		expect(replacement).toBeDefined();
+		if (replacement === undefined) throw new Error("Missing replacement refresh cookie");
 		expect(replacement).not.toBe(original);
 		expect(response.headers["set-cookie"][0]).toMatch(
 			/^refresh_token=.*; HttpOnly; Max-Age=2592000; Path=\/api\/auth; SameSite=lax$/,
