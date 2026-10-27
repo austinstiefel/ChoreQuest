@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
@@ -19,7 +20,7 @@ import { disposableDatabase } from "../helpers/sqlite.js";
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const python = resolve(root, "../.venv/Scripts/python.exe");
+const python = pythonExecutable;
 const cli = resolve(dirname(createRequire(import.meta.url).resolve("prisma/package.json")), "build/index.js");
 const dispose: Array<() => Promise<unknown>> = [];
 afterEach(async () => { while (dispose.length) await dispose.pop()!(); });

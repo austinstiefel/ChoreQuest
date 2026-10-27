@@ -10,18 +10,34 @@ RUN npm run build
 
 FROM node:22-bookworm-slim AS server-build
 WORKDIR /build/server
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@10.34.6 --activate
 COPY server/package.json server/pnpm-lock.yaml ./
 COPY server/prisma/ ./prisma/
 RUN pnpm install --frozen-lockfile && pnpm prisma:generate
 COPY server/tsconfig.json ./
 COPY server/src/ ./src/
-RUN pnpm build && pnpm prune --prod
+RUN pnpm build
+
+FROM server-build AS production-dependencies
+RUN pnpm prune --prod
+RUN node --input-type=module -e "import {PrismaClient} from '@prisma/client'; import bcrypt from 'bcrypt'; import sharp from 'sharp'; new PrismaClient({datasources:{db:{url:'file:/tmp/build-probe-only.db'}}}); await bcrypt.hash('build-probe-only',4); await sharp({create:{width:1,height:1,channels:3,background:'red'}}).png().toBuffer();"
+
+# Explicit provisioning tool, never the application entrypoint. Keep the full
+# CLI dependencies in a separate target; do not put a migration CLI in runtime.
+FROM node:22-bookworm-slim AS provisioner
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app/server
+COPY --from=server-build --chown=node:node /build/server/ ./
+COPY --chown=node:node server/scripts/initialize-sqlite.mjs server/scripts/staging-init.mjs ./scripts/
+RUN mkdir -p /app/data && chown node:node /app/data
+USER node
+ENTRYPOINT ["node", "scripts/staging-init.mjs"]
 
 FROM node:22-bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssl tzdata && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=server-build --chown=node:node /build/server/node_modules ./server/node_modules/
+COPY --from=production-dependencies --chown=node:node /build/server/node_modules ./server/node_modules/
 COPY --from=server-build --chown=node:node /build/server/dist ./server/dist/
 COPY --from=server-build --chown=node:node /build/server/prisma ./server/prisma/
 COPY --from=server-build --chown=node:node /build/server/package.json ./server/package.json

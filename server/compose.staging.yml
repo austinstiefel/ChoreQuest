@@ -1,0 +1,50 @@
+# Opt-in only: docker compose --env-file <private-file> -f server/compose.staging.yml ...
+# Neither service uses the Python service, its bind mounts, or the proxy network.
+name: chorequest-node-staging
+services:
+  provision:
+    profiles: [tools]
+    image: chorequest-node-provision:phase6
+    build:
+      context: ..
+      dockerfile: server/Dockerfile.node
+      target: provisioner
+    environment:
+      DATABASE_URL: file:/app/data/chorequest.db
+    volumes:
+      - database:/app/data
+    network_mode: none
+  app:
+    image: chorequest-node-staging:phase6
+    build:
+      context: ..
+      dockerfile: server/Dockerfile.node
+      target: runtime
+    environment:
+      DATABASE_URL: file:/app/data/chorequest.db
+      SECRET_KEY: ${STAGING_SECRET_KEY:?Provide a private staging signing key}
+      INITIAL_ADMIN_PASSWORD: ${STAGING_ADMIN_PASSWORD:?Provide a private staging password}
+      COOKIE_SECURE: ${STAGING_COOKIE_SECURE:-false}
+      CORS_ORIGINS: ${STAGING_CORS_ORIGINS:-}
+      TZ: ${STAGING_TZ:-UTC}
+      DAILY_RESET_HOUR: ${STAGING_RESET_HOUR:-0}
+      VAPID_CLAIM_EMAIL: ${STAGING_VAPID_CONTACT:-mailto:staging@example.invalid}
+    ports:
+      - "127.0.0.1:${STAGING_PORT:-8123}:8122"
+    volumes:
+      - database:/app/data
+      - uploads:/app/data/uploads
+    networks: [isolated]
+    init: true
+    stop_grace_period: 75s
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+networks:
+  isolated:
+    internal: true
+volumes:
+  database:
+  uploads:

@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile } from "node:fs/promises";
@@ -19,7 +20,7 @@ import { disposableDatabase } from "../helpers/sqlite.js";
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const python = resolve(root, "../.venv/Scripts/python.exe");
+const python = pythonExecutable;
 const upgrade = resolve(root, "scripts/prepare-legacy-auth-db.py");
 const config = { secretKey: "legacy-review-test-only-secret", accessTokenExpireMinutes: 15,
 	refreshTokenExpireDays: 30, cookieSecure: false, corsOrigins: [] };

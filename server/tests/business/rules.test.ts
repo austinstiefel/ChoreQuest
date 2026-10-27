@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { describe, expect, it } from "vitest";
 import { occurs, rotationKid } from "../../src/business/scheduling.js";
 import { petLevel, rank, effectiveStreak } from "../../src/business/gamification.js";
@@ -54,7 +55,7 @@ describe("request validation", () => {
 	});
 	it("verifies the actual Python create/convert positive-value rules and unconstrained edit schemas without loading app configuration",async()=>{
 		const repo=fileURLToPath(new URL("../../../",import.meta.url));
-		const {stdout}=await promisify(execFile)(fileURLToPath(new URL("../../../.venv/Scripts/python.exe",import.meta.url)),["-c",[
+		const {stdout}=await promisify(execFile)(pythonExecutable,["-c",[
 			"import ast,enum,json,sys,pathlib",
 			"from pydantic import BaseModel,Field,ValidationError",
 			"root=pathlib.Path(sys.argv[1])",

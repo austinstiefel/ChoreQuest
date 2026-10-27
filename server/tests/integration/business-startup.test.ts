@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:net";
@@ -67,7 +68,7 @@ it("starts the production runtime on an empty disposable DB and completes a real
 	const redemption = await http(`/api/rewards/${reward.id}/redeem`, "POST", kidToken);
 	await http(`/api/rewards/redemptions/${redemption.id}/fulfill`, "POST", admin);
 	expect(await db.prisma.$queryRaw `PRAGMA foreign_key_check`).toEqual([]);
-	const python = fileURLToPath(new URL("../../../.venv/Scripts/python.exe", import.meta.url));
+	const python = pythonExecutable;
 	const result = await run(python, ["-c", [
 			"import sys,json",
 			"from sqlalchemy import create_engine,select",

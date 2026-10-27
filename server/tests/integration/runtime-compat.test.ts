@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -13,7 +14,7 @@ import { PushService, type PushSender } from "../../src/runtime/push.js";
 import { notify } from "../../src/business/gamification.js";
 import { requireDeletionSchema } from "../../src/db/accountSchema.js";
 import { disposableDatabase } from "../helpers/sqlite.js";
-const run = promisify(execFile), root = fileURLToPath(new URL("../../../", import.meta.url)), python = resolve(root, ".venv/Scripts/python.exe");
+const run = promisify(execFile), root = fileURLToPath(new URL("../../../", import.meta.url)), python = pythonExecutable;
 const disposers: Array<() => Promise<unknown>> = [];
 afterEach(async () => { while (disposers.length)
 	await disposers.pop()!(); });

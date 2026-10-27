@@ -164,7 +164,10 @@ export class PushService {
 					await deleteState(tx.db, claimed.key);
 			});
 			if (["retry", "rejected"].includes(outcome))
-				console.warn("Push provider delivery failed; bounded retry policy applied");
+				console.warn(outcome === "retry" && claimed.job.attempts >= 4
+					? "Push retry limit reached; queued delivery removed"
+					: outcome === "rejected" ? "Push delivery permanently rejected; queued delivery removed"
+					: "Push provider delivery failed; bounded retry policy applied");
 		}
 	}
 	kick(): void {

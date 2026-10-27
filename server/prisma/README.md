@@ -1,9 +1,10 @@
 # SQLite deployment and Python-to-Node migration
 
-These procedures are for the Phase 3 Node authentication/administration backend.
-They do not migrate the frontend, business routes, WebSockets, background jobs or
-push delivery. Phase 4 development can proceed; this is not a full-application
-feature-parity claim. Never run `prisma migrate reset` or `db push` on live data.
+These database safety procedures support the integrated Node backend, including
+authentication, business REST routes, WebSockets, push and daily maintenance.
+See `../PHASE5.md` for runtime parity and `../PHASE6.md` for deployment evidence
+and remaining acceptance gates. Never run `prisma migrate reset` or `db push`
+on live data. Schema provisioning remains an explicit offline operation.
 
 ## Toolchain and file conventions
 

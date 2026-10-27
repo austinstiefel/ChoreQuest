@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { generateKeyPairSync } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -41,7 +42,7 @@ it("generates Python-readable P-256 keys once and preserves them across restarts
 		await second.$disconnect();
 	}
 	expect(await db.prisma.$queryRaw `SELECT key,value,CAST(updated_at AS TEXT) AS updated_at FROM app_settings ORDER BY key`).toEqual(before);
-	const result = await promisify(execFile)(fileURLToPath(new URL("../../../.venv/Scripts/python.exe", import.meta.url)), ["-B", "-c", [
+	const result = await promisify(execFile)(pythonExecutable, ["-B", "-c", [
 			"import sys,sqlite3,base64",
 			"from cryptography.hazmat.primitives import serialization",
 			"db=sqlite3.connect(sys.argv[1])",
@@ -140,6 +141,7 @@ it("bounds retries and emits only generic warnings", async () => {
 	expect(await jobs()).toEqual([]);
 	expect(await db.prisma.push_subscriptions.count()).toBe(1);
 	expect(JSON.stringify(warning.mock.calls)).not.toContain("private payload");
+	expect(warning.mock.calls.flat()).toContain("Push retry limit reached; queued delivery removed");
 });
 it("claims push jobs across independent database connections without concurrent duplicates", async () => {
 	await enqueue();

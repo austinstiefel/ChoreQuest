@@ -1,3 +1,4 @@
+import { pythonExecutable } from "../helpers/python.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
@@ -43,17 +44,23 @@ it.each([false, true])("preserves all populated rows and schedules through repea
 	await store.insert("vacation_periods", { start_date: "2030-02-01", end_date: "2030-02-07", is_active: true, created_by: admin.id });
 	const achievement = await store.insert("achievements", { ...seedCatalogue.DEFAULT_ACHIEVEMENTS[0], title: "Custom achievement", points_reward: 1234, criteria: { type: "total_completions", count: 777 }, tier: "custom", group_key: "custom", sort_order: 999 });
 	await store.insert("user_achievements", { user_id: kid.id, achievement_id: achievement.id, unlocked_at: "2030-01-01 03:04:05.987654" });
-	await store.insert("rewards", { title: "Customized reward", description: "Do not replace", point_cost: 888, icon: null, category: null, stock: 2, auto_approve_threshold: 3, is_active: false, created_by: admin.id });
+	const reward = await store.insert("rewards", { title: "Customized reward", description: "Do not replace", point_cost: 888, icon: null, category: null, stock: 2, auto_approve_threshold: 3, is_active: false, created_by: admin.id });
+	await store.insert("reward_redemptions", { reward_id: reward.id, user_id: kid.id, points_spent: 888, status: "fulfilled", approved_by: admin.id, approved_at: "2030-01-01 01:02:03.123456", fulfilled_by: admin.id, fulfilled_at: "2030-01-01 01:03:04.654321" });
+	await store.insert("point_transactions", { user_id: kid.id, amount: 345, type: "bonus", description: "Retain historical balance", reference_id: null, created_by: admin.id, created_at: "2001-01-01 00:00:00.123456" });
+	await store.insert("notifications", { user_id: kid.id, type: "bonus_points", title: "Fixture notification", message: "Retain", is_read: false, reference_type: null, reference_id: null });
+	await store.insert("push_subscriptions", { user_id: kid.id, endpoint: "https://fcm.googleapis.com/synthetic-never-send", p256dh: "synthetic-public", auth: "synthetic-auth" });
 	await store.insert("quest_templates", { title: "Custom template", description: "Keep", suggested_points: 666, difficulty: "expert", category_name: "Custom", icon: null });
 	const avatar = await store.insert("avatar_items", { category: "head", item_id: "round", display_name: "Custom round", rarity: "epic", unlock_method: "shop", unlock_value: 456, is_default: false });
 	await store.insert("user_avatar_items", { user_id: kid.id, avatar_item_id: avatar.id, acquired_via: "purchase" });
 	for (const [key, value] of Object.entries({ daily_reset_hour: "17", spin_wheel_enabled: "false", initial_setup_complete: "true", initial_password_setup_required: "false", vapid_private_key: "synthetic-private-fixture", custom_setting: "retain" })) await prisma.$executeRaw`INSERT INTO app_settings (key,value,updated_at) VALUES (${key},${value},'2001-01-01 00:00:00.123456')`;
 	if (legacy) {
+		const rowsBeforePreparation = await Promise.all(tables.map(table => store.rows(table)));
 		await prisma.$disconnect();const source = await readFile(db.databasePath), prepared = resolve(db.directory, "prepared.db");
-		await execute(resolve(root, "../.venv/Scripts/python.exe"), ["-B", resolve(root, "scripts/prepare-legacy-auth-db.py"), "--source", db.databasePath, "--output", prepared], { windowsHide: true });
+		await execute(pythonExecutable, ["-B", resolve(root, "scripts/prepare-legacy-auth-db.py"), "--source", db.databasePath, "--output", prepared], { windowsHide: true });
 		expect(await readFile(db.databasePath)).toEqual(source);
 		prisma = new PrismaClient({ datasources: { db: { url: `file:${prepared.replaceAll("\\", "/")}?connection_limit=1` } } });
 		cleanup.push(() => prisma.$disconnect());store = await Store.open(prisma);
+		for (const [index, table] of tables.entries()) expect(await store.rows(table), `Prepared legacy ${table}`).toEqual(rowsBeforePreparation[index]);
 	}
 	await requireDeletionSchema(prisma);
 	const before = await snapshot(prisma);
