@@ -23,6 +23,7 @@ export function registerRewards(api: BusinessRouter) {
 	for (const action of ["approve", "deny", "fulfill"] as const)
 		api.add({ method: "post", path: `/api/rewards/redemptions/:redemption_id/${action}`, role: "parent", async run({ store, user, id }) {
 				const row = await store.one("reward_redemptions", id("redemption_id"), "Redemption");
+				if(!Number.isSafeInteger(Number(row.points_spent))||Number(row.points_spent)<=0)throw new BusinessError(400,"Redemption points are invalid; administrator review is required");
 				if (row.status !== (action === "fulfill" ? "approved" : "pending"))
 					throw new BusinessError(400, action === "fulfill" ? "Only approved redemptions can be fulfilled" : "Redemption is not pending");
 				const reward = await store.one("rewards", Number(row.reward_id), "Reward");

@@ -6,6 +6,8 @@ import { BusinessError, Store, write, type Row } from "./store.js";
 import { validate, type Rules } from "./validation.js";
 import { Download, UploadStorage } from "./uploads.js";
 import { businessResponse } from "./response.js";
+import type { Delivery } from "./integrations.js";
+import { planEvents } from "../runtime/events.js";
 export type Role = "public" | "authenticated" | "parent" | "admin";
 export interface Context {
 	store: Store;
@@ -35,7 +37,7 @@ export interface BusinessRouter {
 }
 /** Business routers use full /api paths so settings can retain parent/public-
  * feature permissions without passing through Phase 3's admin-only router. */
-export async function businessRouter(prisma: PrismaClient, config: AuthConfig, uploads = new UploadStorage()): Promise<BusinessRouter> {
+export async function businessRouter(prisma: PrismaClient, config: AuthConfig, uploads = new UploadStorage(), delivery: Delivery = {}): Promise<BusinessRouter> {
 	const router = Router(), routes: Endpoint[] = [], store = await Store.open(prisma);
 	const authenticate = createAuthenticateRequest(config, createPrismaAuthUserRepository(prisma));
 	return { router, routes, add(endpoint) {
@@ -51,14 +53,23 @@ export async function businessRouter(prisma: PrismaClient, config: AuthConfig, u
 					// Consume/limit uploads before taking SQLite's writer reservation.
 					const file = endpoint.multipart ? await uploads.parse(request) : null;
 					const body = endpoint.rules ? validate(request.body, endpoint.rules) : {};
-					const execute = (store: Store) => endpoint.run({ store, body, request, file, onRollback: fn => cleanups.push(fn), user: request.authenticatedUser!,
+					const execute = async (store: Store) => {
+						const result = await endpoint.run({ store, body, request, file, onRollback: fn => cleanups.push(fn), user: request.authenticatedUser!,
 						id: key => Number(validate(request.params, { [key]: { type: "int" } }, "path")[key]),
 						query: rules => validate(request.query, rules, "query"),
-					});
-					const result = (endpoint.writes ?? endpoint.method !== "get") ? await write(prisma, store, execute) : await execute(store);
+						});
+						const events = delivery.publish ? await planEvents(store, endpoint, request.authenticatedUser!, body, result) : [];
+						await delivery.prepare?.(store);
+						return { result, events };
+					};
+					const { result, events } = (endpoint.writes ?? endpoint.method !== "get") ? await write(prisma, store, execute) : await execute(store);
 					// The business transaction has committed. A response/network error
 					// must not remove a proof file now referenced by a committed row.
 					cleanups.length = 0;
+					// Transport failures cannot undo committed business state. Push jobs
+					// were persisted inside the transaction; WebSocket delivery is ephemeral.
+					try { await delivery.publish?.(events); }
+					catch { console.warn("Post-commit event delivery failed"); }
 					response.status(endpoint.status ?? 200);
 					if (endpoint.status === 204)
 						response.end();

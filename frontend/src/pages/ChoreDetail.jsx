@@ -95,6 +95,8 @@ export default function ChoreDetail() {
   const [error, setError] = useState('');
   const [actionLoading, setActionLoading] = useState('');
   const [actionMessage, setActionMessage] = useState('');
+  const [selectedAssignmentId, setSelectedAssignmentId] = useState('');
+  const [proofFile, setProofFile] = useState(null);
 
   // Rotation state (parent only)
   const [rotation, setRotation] = useState(null);
@@ -151,8 +153,11 @@ export default function ChoreDetail() {
     setActionLoading('complete');
     setActionMessage('');
     try {
-      await api(`/api/chores/${id}/complete`, { method: 'POST' });
-      setActionMessage('Quest completed! XP has been awarded to your hero.');
+      const body = proofFile ? new FormData() : undefined;
+      if (proofFile) body.append('file', proofFile);
+      await api(`/api/chores/${id}/complete`, { method: 'POST', body });
+      setProofFile(null);
+      setActionMessage('Quest submitted for approval.');
       await fetchChore();
     } catch (err) {
       setActionMessage(err.message || 'Failed to complete the quest.');
@@ -311,10 +316,13 @@ export default function ChoreDetail() {
 
   // Determine today's assignment
   const assignments = chore.assignments || chore.history || [];
-  const today = new Date().toISOString().split('T')[0];
-  const todayAssignment = assignments.find(
+  const now = new Date();
+  const today = chore.server_today || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const todayAssignments = assignments.filter(
     (a) => a.date === today || a.assigned_date === today || a.due_date === today
   );
+  const todayAssignment = todayAssignments.find(a => String(a.id) === selectedAssignmentId)
+    || (todayAssignments.length === 1 ? todayAssignments[0] : null);
   const hasPendingToday =
     todayAssignment && (todayAssignment.status === 'pending' || todayAssignment.status === 'assigned');
   const recentAssignments = assignments.slice(0, 10);
@@ -434,13 +442,19 @@ export default function ChoreDetail() {
       {/* Actions for kids */}
       {isKid && hasPendingToday && (
         <div className="game-panel p-5">
+          {chore.requires_photo && (
+            <label className="block text-muted text-sm mb-3">
+              Photo proof
+              <input className="block mt-1 w-full" type="file" accept="image/jpeg,image/png,image/gif,image/webp" onChange={event => setProofFile(event.target.files?.[0] || null)} />
+            </label>
+          )}
           <div className="flex items-center justify-between">
             <div>
               <p className="text-cream text-sm font-semibold mb-1">Today's Quest</p>
             </div>
             <button
               onClick={handleComplete}
-              disabled={!!actionLoading}
+              disabled={!!actionLoading || (chore.requires_photo && !proofFile)}
               className={`game-btn game-btn-blue flex items-center gap-2 ${
                 actionLoading === 'complete' ? 'opacity-60 cursor-wait' : ''
               }`}
@@ -456,10 +470,23 @@ export default function ChoreDetail() {
       {isParent && (
         <div className="game-panel p-5">
           <p className="text-cream text-sm font-semibold mb-3">Actions</p>
+          {todayAssignments.length > 1 && (
+            <label className="block text-muted text-sm mb-3">
+              Hero
+              <select className="field-input mt-1" value={selectedAssignmentId} onChange={event => setSelectedAssignmentId(event.target.value)}>
+                <option value="">Select a hero</option>
+                {todayAssignments.map(assignment => (
+                  <option key={assignment.id} value={assignment.id}>
+                    {assignment.user?.display_name || assignment.user?.username || `Hero ${assignment.user_id}`} — {assignment.status}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <div className="flex flex-wrap gap-3">
             <button
               onClick={() => handleVerify(todayAssignment?.id)}
-              disabled={!!actionLoading}
+              disabled={!!actionLoading || todayAssignment?.status !== 'completed'}
               className={`game-btn game-btn-blue flex items-center gap-2 ${
                 actionLoading === 'verify' ? 'opacity-60 cursor-wait' : ''
               }`}
@@ -469,7 +496,7 @@ export default function ChoreDetail() {
             </button>
             <button
               onClick={() => handleUncomplete(todayAssignment?.id)}
-              disabled={!!actionLoading}
+              disabled={!!actionLoading || !['completed', 'verified'].includes(todayAssignment?.status)}
               className={`game-btn game-btn-blue flex items-center gap-2 ${
                 actionLoading === 'uncomplete' ? 'opacity-60 cursor-wait' : ''
               }`}
@@ -479,7 +506,7 @@ export default function ChoreDetail() {
             </button>
             <button
               onClick={() => handleSkip(todayAssignment?.id)}
-              disabled={!!actionLoading}
+              disabled={!!actionLoading || todayAssignment?.status !== 'pending'}
               className={`game-btn game-btn-red flex items-center gap-2 ${
                 actionLoading === 'skip' ? 'opacity-60 cursor-wait' : ''
               }`}

@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { BusinessError, day, monday, addDays, pick, object, type Row, type Store } from "./store.js";
 import { achievements, advanceStreak, award, notify, points, questDrop, petXp, setPetXp } from "./gamification.js";
-import { activeWeekdays, assignmentView, choreView, choreProjection, createAssignment, occurs, rotationKid, rotationView, ruleFields } from "./scheduling.js";
+import { activeWeekdays, assignmentView, assignmentProjection, choreView, choreProjection, createAssignment, occurs, rotationKid, rotationView, ruleFields } from "./scheduling.js";
 import { cadence, difficulty, ids, int, optional, recurrence, str, type Rules } from "./validation.js";
 import type { BusinessRouter } from "./router.js";
 import type { UploadStorage } from "./uploads.js";
@@ -66,7 +66,20 @@ export function registerChores(api: BusinessRouter, uploads: UploadStorage) {
 			const pending = await store.db.$executeRaw `DELETE FROM chore_assignments WHERE status = 'pending'`, exclusions = await store.db.$executeRaw `DELETE FROM chore_exclusions`;
 			return { message: `Cleaned up ${pending} pending assignments and ${exclusions} exclusions`, pending_removed: pending, exclusions_removed: exclusions };
 		} });
-	api.add({ method: "get", path: "/api/chores/:chore_id", role: "authenticated", async run({ store, id }) { return choreView(store, await activeChore(store, id("chore_id"))); } });
+	api.add({ method: "get", path: "/api/chores/:chore_id", role: "authenticated", async run({ store, id, user }) {
+		const chore = await activeChore(store, id("chore_id"));
+		const today=day(),scope=Prisma.sql`chore_id=${chore.id} ${user.role === "kid" ? Prisma.sql`AND user_id=${user.id}` : Prisma.empty}`;
+		const date=Prisma.sql`CASE WHEN typeof(date) IN ('integer','real') THEN date(date/1000.0,'unixepoch') ELSE substr(date,1,10) END`;
+		// Future calendar projections must not push today's actionable records
+		// out of a history limit. Include ALL today's children, plus bounded past
+		// history; preserve private ownership for kid callers and legacy dates.
+		const rows=[...await store.rows("chore_assignments",Prisma.sql`WHERE ${scope} AND ${date}=${today} ORDER BY id DESC`),...await store.rows("chore_assignments",Prisma.sql`WHERE ${scope} AND ${date}<${today} ORDER BY ${date} DESC,id DESC LIMIT 50`)];
+		const userIds=[...new Set(rows.map(a=>a.user_id))];
+		const users=new Map((await store.rows("users",Prisma.sql`WHERE id IN (${Prisma.join(userIds.length?userIds:[-1])})`)).map(u=>[u.id,u]));
+		const category=await store.one("chore_categories",Number(chore.category_id),"Category");
+		const rule=user.role==="kid"?(await store.rows("chore_assignment_rules",Prisma.sql`WHERE chore_id=${chore.id} AND user_id=${user.id} AND is_active=1`))[0]:undefined;
+		return { ...choreProjection(chore,category), ...(rule?{requires_photo:rule.requires_photo}:{}), server_today: today, assignments: rows.map(row=>assignmentProjection(row,chore,category,users.get(row.user_id)!)) };
+	} });
 	api.add({ method: "put", path: "/api/chores/:chore_id", role: "parent", rules: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, optional({ ...v, max:undefined, default: undefined })])), async run({ store, body, id }) {
 			const c = await activeChore(store, id("chore_id")), { assigned_user_ids, ...values } = body;
 			for (const key of ["title", "points", "difficulty", "category_id", "recurrence", "requires_photo"])
@@ -162,8 +175,11 @@ export function registerChores(api: BusinessRouter, uploads: UploadStorage) {
 			return { chore: pick(c, "id title is_active recurrence"), rotation: rot ? { ...pick(rot, "id kid_ids cadence current_index last_rotated"), kid_ids_types: (rot.kid_ids as number[]).map(() => "int") } : null, rules: (await store.rows("chore_assignment_rules", Prisma.sql `WHERE chore_id = ${c.id}`)).map(r => pick(r, "id user_id recurrence is_active")), assignments_this_week: (await store.rows("chore_assignments", Prisma.sql `WHERE chore_id = ${c.id}`)).filter(a => String(a.date) >= start && String(a.date) <= end).sort((a, b) => String(a.date).localeCompare(String(b.date))).map(a => pick(a, "id user_id date status")), exclusions_this_week: (await store.rows("chore_exclusions", Prisma.sql `WHERE chore_id = ${c.id}`)).filter(a => String(a.date) >= start && String(a.date) <= end).map(a => pick(a, "chore_id user_id date")), server_today: day(), week_start: start };
 		} });
 	for (const action of ["complete", "verify", "uncomplete", "skip"] as const)
-		api.add({ method: "post", path: `/api/chores/:chore_id/${action}`, role: action === "complete" ? "authenticated" : "parent", multipart: action === "complete", async run({ store, user, id, file, onRollback }) {
-				const cid = id("chore_id"), rows = (await store.rows("chore_assignments", Prisma.sql `WHERE chore_id = ${cid}`)).filter(a => a.date === day() && (action !== "complete" || a.user_id === user.id));
+		for (const targeted of action === "complete" ? [false] : [false,true])
+		api.add({ method: "post", path: targeted ? `/api/chores/assignments/:assignment_id/${action}` : `/api/chores/:chore_id/${action}`, role: action === "complete" ? "authenticated" : "parent", multipart: action === "complete", async run({ store, user, id, query, file, onRollback }) {
+				const selected = targeted ? id("assignment_id") : query({assignment_id:optional(int(0))}).assignment_id;
+				const assignment = targeted ? await store.one("chore_assignments",Number(selected),"Assignment") : null;
+				const cid = assignment ? Number(assignment.chore_id) : id("chore_id"), rows = (await store.rows("chore_assignments", Prisma.sql `WHERE chore_id = ${cid}`)).filter(a => a.date === day() && (selected == null || a.id === Number(selected)) && (action !== "complete" || a.user_id === user.id));
 				const allowed = action === "complete" || action === "skip" ? ["pending"] : action === "verify" ? ["completed"] : ["completed", "verified"];
 				const candidates = rows.filter(a => allowed.includes(String(a.status)));
 				if (!candidates.length)
@@ -193,6 +209,7 @@ export function registerChores(api: BusinessRouter, uploads: UploadStorage) {
 					const now = new Date();
 					const events = (await store.rows("seasonal_events", Prisma.sql `WHERE is_active = 1`)).filter(e => eventInRange(e, now));
 					const multiplier = events.reduce((m, e) => m * Number(e.multiplier), 1), base = Number(c.points), bonus = Math.max(0, Math.trunc(base * multiplier) - base);
+					if(!Number.isSafeInteger(base)||base<=0)throw new BusinessError(400,"Chore points are invalid; update the chore before verification");
 					await store.update("chore_assignments", Number(a.id), { status: "verified", verified_at: new Date(), verified_by: user.id });
 					await points(store, Number(target.id), base, "chore_complete", `Completed: ${c.title}`, Number(a.id));
 					if (bonus > 0)

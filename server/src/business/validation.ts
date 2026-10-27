@@ -86,9 +86,14 @@ export function validate(value: unknown, rules: Rules, source = "body"): Row {
 				if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() < 1 || date.getUTCFullYear() > 9999)
 					return fail("date_from_datetime_parsing", "Input should be a valid date or datetime");
 				if (rule.type === "date") {
-					if (date.getUTCHours() || date.getUTCMinutes() || date.getUTCSeconds() || date.getUTCMilliseconds())
+					const fraction=typeof value==="string"&&!numeric?/\.(\d{1,6})(?:[Zz]|[+-]\d\d:?\d\d)?$/.exec(value)?.[1]:undefined;
+					// Pydantic casts an exact LOCAL midnight to its date, even when
+					// an offset was supplied; UTC conversion must not move that date.
+					const clock=typeof value==="string"&&!numeric?/[Tt ](\d\d):(\d\d)(?::(\d\d))?/.exec(value):null;
+					const nonzero=clock?Number(clock[1])||Number(clock[2])||Number(clock[3]??0)||Number(fraction??0):date.getUTCHours()||date.getUTCMinutes()||date.getUTCSeconds()||date.getUTCMilliseconds();
+					if (nonzero)
 						return fail("date_from_datetime_inexact", "Datetimes provided to dates should have zero time - e.g. be exact dates");
-					parsed = date.toISOString().slice(0, 10);
+					parsed = clock ? String(value).slice(0,10) : date.toISOString().slice(0, 10);
 				}
 				else {
 					const fraction = typeof value === "string" && !numeric ? /\.(\d{1,6})(?:[Zz]|[+-]\d\d:?\d\d)?$/.exec(value)?.[1] : undefined;

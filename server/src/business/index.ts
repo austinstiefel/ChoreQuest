@@ -10,7 +10,7 @@ import { registerReports } from "./reports.js";
 import { registerUploads, UploadStorage } from "./uploads.js";
 import { registerIntegrations, type Delivery } from "./integrations.js";
 export async function createBusinessRouter(prisma: PrismaClient, config: AuthConfig, uploads = new UploadStorage(), delivery: Delivery = {}) {
-	const api = await businessRouter(prisma, config, uploads);
+	const api = await businessRouter(prisma, config, uploads, delivery);
 	registerHousehold(api);
 	registerRewards(api);
 	registerChores(api, uploads);

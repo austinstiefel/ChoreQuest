@@ -581,6 +581,7 @@ export function createAuthRouter(input: {
 	config: AuthConfig;
 	repository: AuthRepository;
 	rateLimiter?: AuthRateLimiter;
+	profileChanged?: (userId: number) => Promise<void>;
 }): Router {
 	const router = Router();
 	const rateLimiter = input.rateLimiter ?? new SlidingWindowRateLimiter();
@@ -822,6 +823,8 @@ export function createAuthRouter(input: {
 			displayName: (body.display_name ?? undefined) as string | undefined,
 			avatarConfig: (body.avatar_config ?? undefined) as Record<string, unknown> | undefined,
 		});
+		try { await input.profileChanged?.(user.id); }
+		catch { console.warn("Post-commit profile event delivery failed"); }
 		const updatedUser = await currentAccount(request, response);
 		if (updatedUser !== null) response.json(userResponse(updatedUser));
 	});

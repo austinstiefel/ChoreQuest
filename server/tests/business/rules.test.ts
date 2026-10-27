@@ -42,6 +42,16 @@ describe("reference scheduling and business boundaries", () => {
 	});
 });
 describe("request validation", () => {
+	it.each([
+		["2030-01-02T00:00:00+02:00",true],
+		["2030-01-02T00:00:00-05:00",true],
+		["2030-01-02T00:00:00.000000Z",true],
+		["2030-01-02T00:00:00.000001Z",false],
+		["2030-01-02T01:00:00+01:00",false],
+	] as const)("matches verified Pydantic date-only midnight/offset semantics (%s)",(value,valid)=>{
+		if(valid)expect(validate({when:value},{when:{type:"date"}})).toEqual({when:"2030-01-02"});
+		else expect(()=>validate({when:value},{when:{type:"date"}})).toThrow();
+	});
 	it("verifies the actual Python create/convert positive-value rules and unconstrained edit schemas without loading app configuration",async()=>{
 		const repo=fileURLToPath(new URL("../../../",import.meta.url));
 		const {stdout}=await promisify(execFile)(fileURLToPath(new URL("../../../.venv/Scripts/python.exe",import.meta.url)),["-c",[

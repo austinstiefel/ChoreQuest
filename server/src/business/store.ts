@@ -21,6 +21,8 @@ function utcTimestamp(value: string | number | Date): string {
  * All request values remain bound parameters. Cast legacy JSON/dates before
  * Prisma decodes them; otherwise SQLite text dates/Unsupported(json) fail. */
 export class Store {
+	readonly inserted: Array<{ table: Table; row: Row }> = [];
+	readonly removed: Array<{ table: Table; row: Row }> = [];
 	private constructor(readonly db: Database, private readonly columns: Map<Table, Column[]>) { }
 	static async open(db: Database): Promise<Store> {
 		const columns = new Map<Table, Column[]>();
@@ -81,7 +83,9 @@ export class Store {
 		const [id] = await this.db.$queryRaw<Array<{
 			id: bigint;
 		}>> `SELECT last_insert_rowid() AS id`;
-		return this.one(table, Number(id.id), "Record");
+		const row = await this.one(table, Number(id.id), "Record");
+		this.inserted.push({ table, row });
+		return row;
 	}
 	async update(table: Table, id: number, data: Row): Promise<void> {
 		const input = { ...data, ...(this.columns.get(table)!.some(c => c.name === "updated_at") ? { updated_at: sqliteTimestamp() } : {}) };
@@ -90,7 +94,10 @@ export class Store {
 			return;
 		await this.db.$executeRaw(Prisma.sql `UPDATE ${identifier(table)} SET ${Prisma.join(entries.map(([k, v]) => Prisma.sql `${identifier(k)} = ${v}`))} WHERE id = ${id}`);
 	}
-	async remove(table: Table, id: number): Promise<void> { await this.db.$executeRaw(Prisma.sql `DELETE FROM ${identifier(table)} WHERE id = ${id}`); }
+	async remove(table: Table, id: number): Promise<void> {
+		if (table === "wishlist_items") this.removed.push({ table, row: await this.one(table, id, "Wishlist item") });
+		await this.db.$executeRaw(Prisma.sql `DELETE FROM ${identifier(table)} WHERE id = ${id}`);
+	}
 }
 export class BusinessError extends Error {
 	constructor(readonly status: number, readonly detail: string | unknown[]) { super("Business request rejected"); }

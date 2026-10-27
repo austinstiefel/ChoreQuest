@@ -80,7 +80,7 @@ describe("complete Python route inventory and guards", () => {
 			}
 		}
 		expect(found.length).toBeGreaterThan(90);
-		expect(new Set(found).size).toBe(api.routes.length);
+		expect(new Set(found).size + 3).toBe(api.routes.length); // secure assignment-specific aliases for the existing frontend
 	});
 	it("rejects unauthenticated requests at every protected endpoint", async () => {
 		for (const route of api.routes.filter(e => e.role !== "public")) {
@@ -194,6 +194,7 @@ describe("chore and calendar lifecycle", () => {
 			await req("post",`/api/calendar/trade/${first.body.notification_id}/${action}`,other).expect(404);
 			await req("post",`/api/calendar/trade/${competing.body.notification_id}/${action}`,third.id).expect(404);
 		}
+		expect((await store.one("notifications",competing.body.notification_id,"Notification")).is_read).toBe(true);
 		expect((await store.rows("notifications")).filter(n=>["trade_accepted","trade_denied"].includes(String(n.type)))).toHaveLength(1);
 		expect((await store.one("chore_assignments",Number(a.id),"Assignment")).user_id).toBe(other);
 	});

@@ -60,7 +60,7 @@ export function registerCalendar(api: BusinessRouter) {
 					await store.update("chore_assignments", Number(a.id), { user_id: user.id });
 					// Resolve competing proposals for this slot so a stale recipient cannot
 					// take it again from the new owner. is_read alone is not a decision.
-					await store.db.$executeRaw `UPDATE notifications SET reference_type = 'trade_resolved' WHERE reference_type = 'trade' AND type = 'trade_proposed' AND reference_id = ${a.id}`;
+					await store.db.$executeRaw `UPDATE notifications SET reference_type = 'trade_resolved', is_read = 1 WHERE reference_type = 'trade' AND type = 'trade_proposed' AND reference_id = ${a.id}`;
 				}
 				await store.update("notifications", Number(n.id), { is_read: true, reference_type: "trade_resolved" });
 				await notify(store, Number(a.user_id), action === "accept" ? "trade_accepted" : "trade_denied", action === "accept" ? "Trade Accepted" : "Trade Denied", `${user.display_name} ${action === "accept" ? "accepted" : "denied"} your trade for '${c.title}'.`, "trade", Number(a.id));

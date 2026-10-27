@@ -6,6 +6,7 @@ import { int, str, optional, type Rules } from "./validation.js";
 import type { BusinessRouter } from "./router.js";
 import { sqliteTimestamp, createdAtOrder } from "../db/legacySqlite.js";
 import { compareTimestamps, eventInRange } from "./time.js";
+import { RUNTIME_PREFIX } from "../runtime/state.js";
 const privateSettings = new Set(["initial_setup_complete", "initial_password_setup_required", "vapid_private_key", "vapid_public_key"]);
 const timeSort = (rows: Row[]) => rows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
 const wishView = (r: Row) => ({ ...pick(r, "id user_id title url image_url notes converted_to_reward_id created_at"), user_display_name: null });
@@ -19,13 +20,13 @@ export function registerHousehold(api: BusinessRouter) {
 					result[String(s.key)] = s.value;
 			return result;
 		} });
-	api.add({ method: "get", path: "/api/admin/settings", role: "parent", async run({ store }) { return Object.fromEntries((await store.rows("app_settings")).filter(s => !privateSettings.has(String(s.key))).map(s => [s.key, s.value])); } });
+	api.add({ method: "get", path: "/api/admin/settings", role: "parent", async run({ store }) { return Object.fromEntries((await store.rows("app_settings")).filter(s => !privateSettings.has(String(s.key)) && !String(s.key).startsWith(RUNTIME_PREFIX)).map(s => [s.key, s.value])); } });
 	api.add({ method: "put", path: "/api/admin/settings", role: "parent", rules: { settings: { type: "dict" } }, async run({ store, body }) {
 			for (const [key, value] of Object.entries(object(body.settings))) {
 				if (typeof value !== "string")
 					throw new BusinessError(422, [{ type: "string_type", loc: ["body", "settings", key], msg: "Input should be a valid string" }]);
 				// Setup flags are authentication state, not parent-editable preferences.
-				if (privateSettings.has(key))
+				if (privateSettings.has(key) || key.startsWith(RUNTIME_PREFIX))
 					throw new BusinessError(400, "Authentication and push key state cannot be changed through settings");
 				await store.db.$executeRaw `INSERT INTO app_settings (key, value, updated_at) VALUES (${key}, ${value}, ${sqliteTimestamp()}) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`;
 			}
