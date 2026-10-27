@@ -4,8 +4,9 @@ import { WebSocket } from "ws";
 
 // Invoked only by the disposable process/container harnesses below. Never takes
 // a CLI URL/password, reads .env, or prints response bodies/credentials.
-export async function exercise(base, password) {
+export async function exercise(base, password, progress = () => undefined) {
   async function http(path, method = "GET", token, body) {
+    progress(`http:${method}:${path}`); // Route/method only; never body or tokens.
     const response = await fetch(base + path, { method, signal: AbortSignal.timeout(15000), headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
@@ -22,6 +23,7 @@ export async function exercise(base, password) {
   for (const [username, role] of [["SmokeParent", "parent"], ["SmokeKid", "kid"]])
     accounts.push(await http("/api/admin/users", "POST", adminToken, { username, display_name: username, role, password }));
   const parent = (await login("SmokeParent")).access_token, kid = (await login("SmokeKid")).access_token;
+  progress("websocket-handshake");
   const socket = new WebSocket(`${base.replace("http:", "ws:")}/ws/${accounts[1].id}`, ["chorequest", `bearer.${kid}`], { origin: base });
   socket.on("error", () => undefined);
   const events = [];
@@ -41,14 +43,17 @@ export async function exercise(base, password) {
     // Upload exercises native sharp decoding and durable upload serving.
     const form = new FormData();
     form.append("file", new Blob([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVQImWNwq9jiVrGFAUIBACbOBcneHHP5AAAAAElFTkSuQmCC", "base64")], { type: "image/png" }), "fixture.png");
+    progress("upload");
     const uploaded = await fetch(base + "/api/uploads", { method: "POST", headers: { Authorization: `Bearer ${kid}` }, body: form, signal: AbortSignal.timeout(15000) });
     assert(uploaded.ok, `Upload returned ${uploaded.status}`);
     const upload = await uploaded.json();
     const notifications = await http("/api/notifications", "GET", kid);
     assert(notifications.length > 0, "Notifications missing");
     const vapid = await http("/api/push/vapid-public-key", "GET", kid);
+    progress("committed-websocket-event");
     for (let i = 0; i < 100 && !events.some(e => e.type === "chore_verified"); i++) await new Promise(r => setTimeout(r, 20));
     assert(events.some(e => e.type === "chore_verified"), "Committed private WS event missing");
+    progress("static-frontend");
     assert((await (await fetch(base + "/")).text()).includes("<html"), "Built frontend missing");
     return { kid, parent, admin: adminToken, kidId: accounts[1].id, points: (await http("/api/auth/me", "GET", kid)).points_balance, vapid: vapid.public_key, upload };
   } finally {
