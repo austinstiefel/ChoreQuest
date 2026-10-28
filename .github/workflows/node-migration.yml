@@ -1,76 +1,76 @@
 name: Node migration validation
 on:
-  push:
-    branches: [node-js-conversion]
-    paths: ['server/**', 'frontend/**', 'backend/**', 'requirements.txt', '.github/workflows/node-migration.yml']
-  pull_request:
-    paths: ['server/**', 'frontend/**', 'backend/**', 'requirements.txt', '.github/workflows/node-migration.yml']
-  workflow_dispatch:
+    push:
+        branches: [node-js-conversion]
+        paths: ["server/**", "frontend/**", "backend/**", "requirements.txt", ".github/workflows/node-migration.yml"]
+    pull_request:
+        paths: ["server/**", "frontend/**", "backend/**", "requirements.txt", ".github/workflows/node-migration.yml"]
+    workflow_dispatch:
 permissions:
-  contents: read
+    contents: read
 concurrency:
-  group: node-migration-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: node-migration-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: server
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.34.6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: server/pnpm-lock.yaml
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-      - run: python -m pip install -r ../requirements.txt
-      - run: echo "CHOREQUEST_TEST_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm prisma:generate
-      - run: pnpm exec node scripts/verify-schema-engine.mjs
-      - run: pnpm typecheck
-      - run: pnpm build
-      - run: pnpm test
-  frontend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm run build
-      # There is no separate frontend test script. Socket/SW tests run in backend.
-  linux-container:
-    needs: [backend, frontend]
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.34.6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: server/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-        working-directory: server
-      - run: node scripts/docker-smoke.mjs
-        working-directory: server
+    backend:
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        defaults:
+            run:
+                working-directory: server
+        steps:
+            - uses: actions/checkout@v5
+            - uses: pnpm/action-setup@v6
+              with:
+                  version: 10.34.6
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: server/pnpm-lock.yaml
+            - uses: actions/setup-python@v6
+              with:
+                  python-version: "3.12"
+                  cache: pip
+            - run: python -m pip install -r ../requirements.txt
+            - run: echo "CHOREQUEST_TEST_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+            - run: pnpm install --frozen-lockfile
+            - run: pnpm prisma:generate
+            - run: pnpm exec node scripts/verify-schema-engine.mjs
+            - run: pnpm typecheck
+            - run: pnpm build
+            - run: pnpm test
+    frontend:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: frontend
+        steps:
+            - uses: actions/checkout@v5
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: npm
+                  cache-dependency-path: frontend/package-lock.json
+            - run: npm ci
+            - run: npm run build
+            # There is no separate frontend test script. Socket/SW tests run in backend.
+    linux-container:
+        needs: [backend, frontend]
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        steps:
+            - uses: actions/checkout@v5
+            - uses: pnpm/action-setup@v6
+              with:
+                  version: 10.34.6
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: server/pnpm-lock.yaml
+            - run: pnpm install --frozen-lockfile
+              working-directory: server
+            - run: node scripts/docker-smoke.mjs
+              working-directory: server
