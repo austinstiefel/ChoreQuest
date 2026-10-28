@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { exercise, verifyRestart } from "./runtime-smoke.mjs";
 import { SmokeStageError, smokeStage, safeDiagnostics, safeContainerState, safeWorkflowOperation, cleanupCommand } from "./docker-smoke-diagnostics.mjs";
+import { discoverLoopbackUrl, ephemeralPortOverride } from "./docker-smoke-ports.mjs";
 const defaultExecute = promisify(execFile), root = fileURLToPath(new URL("../../", import.meta.url));
 
 // Injectable orchestration is tested without Docker or an application database.
@@ -22,9 +23,10 @@ await stage("docker-availability", async () => {
 });
 const directory = await stage("fixture-directory", () => mkdtemp(resolve(tmpdir(), "chorequest-container-test-")));
 const project = `chorequest-phase6-${randomBytes(6).toString("hex")}`, envFile = resolve(directory, ".env");
+const overrideFile = resolve(directory, "compose.smoke.yml");
 const password = randomBytes(24).toString("hex");
 log({ stage: "fixture-project", project, status: "allocated" });
-const args = ["compose", "--project-name", project, "--env-file", envFile, "-f", resolve(root, "server/compose.staging.yml")];
+const args = ["compose", "--project-name", project, "--env-file", envFile, "-f", resolve(root, "server/compose.staging.yml"), "-f", overrideFile];
 // Shell variables override Compose env files. Never inherit an operator's real
 // staging credentials, port or configuration into this disposable test.
 const composeEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("STAGING_")));
@@ -34,7 +36,10 @@ async function compose(...command) {
 }
 let failure, cleanupFailure;
 try {
-  await stage("fixture-configuration", () => writeFile(envFile, `STAGING_SECRET_KEY=${randomBytes(32).toString("hex")}\nSTAGING_ADMIN_PASSWORD=${password}\nSTAGING_PORT=0\n`, { mode: 0o600 }));
+  await stage("fixture-configuration", async () => {
+    await writeFile(envFile, `STAGING_SECRET_KEY=${randomBytes(32).toString("hex")}\nSTAGING_ADMIN_PASSWORD=${password}\n`, { mode: 0o600, flag: "wx" });
+    await writeFile(overrideFile, ephemeralPortOverride, { mode: 0o600, flag: "wx" });
+  });
   await stage("build-runtime-image", () => compose("build", "app"));
   await stage("build-provisioner-image", () => compose("build", "provision"));
   await stage("provision-database", () => compose("run", "--rm", "provision"));
@@ -48,9 +53,7 @@ try {
   });
   await stage("startup-health", () => compose("up", "-d", "--wait", "--wait-timeout", "120", "app"));
   async function baseUrl() {
-    const { stdout } = await compose("port", "app", "8122");
-    assert.match(stdout.trim(), /^127\.0\.0\.1:\d+$/);
-    return `http://${stdout.trim()}`;
+    return discoverLoopbackUrl({ compose, execute: exec, docker, project });
   }
   const base = await stage("discover-loopback-port", baseUrl);
   const progress = operation => log({ stage: "http-ws-workflow", operation: safeWorkflowOperation(operation), status: "start" });

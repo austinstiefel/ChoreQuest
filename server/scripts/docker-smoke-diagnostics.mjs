@@ -1,5 +1,6 @@
 // Child-process Error.message includes command/argv, and assertions can include
 // token/key actual/expected values. Expose categories, never raw error dumps.
+import { portIssues } from "./docker-smoke-ports.mjs";
 const processCodes = new Set(["ENOENT", "EACCES", "EPERM", "ENOSPC", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "ABORT_ERR", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"]);
 const kinds = new Set(["AssertionError", "TypeError", "SyntaxError", "AbortError", "TimeoutError", "Error"]);
 const signatures = [
@@ -16,6 +17,8 @@ const signatures = [
   ["sqlite_locked", /database is locked|SQLITE_BUSY/i],
   ["container_unhealthy", /unhealthy|failed to become healthy/i],
   ["port_binding", /port is already allocated|failed to bind host port|address already in use/i],
+  ["port_mapping_missing", /no port 8122\/tcp for container/i],
+  ["compose_override_unsupported", /unknown tag.*!override|unsupported.*!override/i],
   ["image_platform", /no matching manifest|exec format error/i],
   ["build_failure", /failed to solve|did not complete successfully/i],
   ["build_input_missing", /failed to (?:compute cache key|calculate checksum)/i],
@@ -36,6 +39,9 @@ export function safeDiagnostics(error) {
   const code = error?.code ?? error?.cause?.code;
   const httpStatus = /^(?:GET|POST|PUT|DELETE) \/api\/[a-zA-Z0-9_/-]+ returned ([1-5]\d\d)$/.exec(error?.message ?? "")?.[1];
   const websocketStatus = /^Unexpected server response: ([1-5]\d\d)$/.exec(error?.message ?? "")?.[1];
+  const portEvidence = Object.fromEntries(["requestedBindingCount", "publishedTargetCount", "publishedBindingCount"]
+    .filter(key => Number.isInteger(error?.portEvidence?.[key]) && error.portEvidence[key] >= 0 && error.portEvidence[key] <= 65535)
+    .map(key => [key, error.portEvidence[key]]));
   return {
     kind: kinds.has(error?.name) ? error.name : "Error",
     ...(Number.isInteger(code) ? { exitCode: code } : processCodes.has(code) ? { code } : {}),
@@ -43,6 +49,7 @@ export function safeDiagnostics(error) {
     ...(error?.killed === true ? { killed: true } : {}),
     ...(httpStatus ? { httpStatus: Number(httpStatus) } : {}),
     ...(websocketStatus ? { websocketStatus: Number(websocketStatus) } : {}),
+    ...(portIssues.has(error?.portIssue) ? { portIssue: error.portIssue, ...portEvidence } : {}),
     codes, categories: signatures.filter(([, pattern]) => pattern.test(text)).map(([category]) => category),
     buildSteps: [...new Set(steps)].slice(-8), capturedOutput: text.length > 0,
     // No fallback raw-output path; add reviewed categories for unknown failures.

@@ -195,3 +195,177 @@ database was accessed, reset or modified. No dependencies were installed/changed
 
 Ready for an independently reviewed development-branch **diagnostic** commit;
 not ready to claim the underlying container defect corrected or CI/staging green.
+
+## Phase 6.2 — ephemeral loopback publication and discovery
+
+Starting commit: `18a16fe46399a0ea6880488d510d8d995e1187e5`, branch
+`node-js-conversion`. Existing untracked `phase6.1-full-review.diff` was preserved.
+This section supplements the historical Phase 6.1 findings above.
+
+### Second run: verified evidence and limits
+
+Read run metadata, job results and actual decoded logs for
+[run 40455183259](https://github.com/austinstiefel/ChoreQuest/actions/runs/40455183259).
+It ran at exactly the starting commit. Backend job `122026736281` passed with
+**337 tests / 25 files / no skips**; frontend also passed. In
+[Linux-container job 122027378843](https://github.com/austinstiefel/ChoreQuest/actions/runs/40455183259/job/122027378843),
+both image builds, provisioning, expected repeat refusal and startup/health passed.
+`discover-loopback-port` failed with child exit 1. The app was running/healthy;
+both cleanup stages passed. HTTP/WS and subsequent runtime checks did not run.
+
+**Established:** the failing operation was `docker compose port app 8122`, not
+the old regex assertion (the reported kind was Error, not AssertionError).
+**Not established:** why that command failed, whether an active host mapping
+existed, or whether explicit zero caused the failure. The failed run published
+no requested/live port-map metadata; cleanup removed its disposable containers.
+No usable local Linux Docker daemon is available for reproduction.
+
+Static evaluation with installed Compose v5.5.0 accepted the old
+`127.0.0.1:0:8122` and normalized it to target 8122/TCP, host 127.0.0.1, published
+`"0"`. Therefore it is not justified to call that syntax invalid from this log.
+Static normalization does not prove actual host allocation or reachability.
+Docker's [Compose ports reference](https://docs.docker.com/reference/compose-file/services/#ports)
+supports omitting the host port for automatic allocation. The correction uses
+that definition explicitly and validates actual live metadata rather than
+inferring runtime state from a requested configuration or internal health check.
+
+### Exact correction (five files)
+
+- `scripts/docker-smoke.mjs`: remove `STAGING_PORT=0` from the generated test
+  environment; create `compose.smoke.yml` inside the existing private temporary
+  directory, exclusively with mode 0600. All Compose operations, including
+  cleanup, use the base file plus this override. Both initial and post-restart
+  discovery call the same fresh metadata-query function.
+- New `scripts/docker-smoke-ports.mjs`: owns the override and strict query/parser.
+  Its generated override is exactly:
+
+  ```yaml
+  services:
+    app:
+      ports: !override
+        - target: 8122
+          host_ip: 127.0.0.1
+          protocol: tcp
+  ```
+
+  `published` is omitted. The [Compose replacement rule](https://docs.docker.com/reference/compose-file/merge/#replace-value)
+  requires Compose >= 2.24.4; `!override` replaces the base sequence instead of
+  appending another mapping. There is no fallback to wildcard binding or fixed
+  test port. An unsupported Compose version fails visibly.
+- `scripts/docker-smoke-diagnostics.mjs`: expose only allowlisted `portIssue`
+  categories and requested/published binding counts; preserve child exit/signal/
+  code classification on query failure. Add safe missing-port/unsupported-override
+  categories. No raw response, environment, labels or port-map dump is logged.
+- `tests/runtime/docker-smoke.test.ts`: retain the original 14 diagnostics/
+  security/provisioning/cleanup cases and add 23 port cases. The orchestration
+  fixture now models two Compose files and real-shaped container inspect data.
+- `PHASE6-CI-FIX.md`: this investigation, correction and evidence.
+
+Normal `compose.staging.yml` is **unchanged**, with its default loopback 8123
+publication. Dockerfile, CI workflow, network isolation, capabilities, read-only
+filesystem, provisioning rules, Python/frontend/application source, Prisma,
+dependencies and lockfiles are unchanged. The generated override never enters
+the repository or image, and is removed with the existing private test directory.
+The existing base-only manual `down` command remains sufficient for cleaning the
+same generated project if automatic cleanup fails; it creates no new services.
+
+### Live metadata checks
+
+1. Query `compose ps --all --quiet app` within the uniquely generated project;
+   require exactly one full 64-hex container ID.
+2. Use `docker inspect --type container --format <fixed-template> <that-id>`.
+   Request only ID, running state, the two exact Compose project/service identity
+   values, `HostConfig.PortBindings` and `NetworkSettings.Ports`. No environment
+   or complete labels/configuration is requested. Identity values are consumed
+   privately and never emitted as label data.
+3. Require matching ID/project, service `app`, and a running container. Require
+   the live port map to contain exactly `8122/tcp` with one binding. Reject absent,
+   malformed, duplicate or unexpected target/protocol entries.
+4. Require exact `HostIp: "127.0.0.1"` and a decimal `HostPort` from 1–65535.
+   Reject zero, wildcard/all-interface binding, invalid values and competing
+   mappings. Only then construct the HTTP URL. Requested ports are diagnostic
+   evidence only; they can never substitute for an active mapping.
+5. After restart repeat both container lookup and inspection, accepting a newly
+   assigned valid port and/or new matching container ID, without caching the URL.
+
+This follows Docker's documented
+[port-map inspection structure](https://docs.docker.com/reference/cli/docker/inspect/#find-a-specific-port-mapping).
+If the next runner has a requested binding but no live mapping, the failure will
+show `published_port_missing`, requested count 1 and published count 0. The smoke
+will fail safely before HTTP, retaining its primary error and cleaning only its
+own project; it will not guess another address or relax the staging network.
+The existing internal network remains unchanged; any engine/network publication
+issue still requires actual metadata/runtime evidence, not a speculative change.
+
+### Regression coverage and static configuration proof
+
+The focused file passed **37 cases**: the original 14 plus 23 additions covering
+valid allocated loopback, missing/null mappings, host port 0/out-of-range/noninteger,
+wildcard IP, wrong target/protocol, competing/duplicate bindings, wrong identity,
+malformed JSON, multiple/missing container IDs, query failure, and cleanup.
+The successful orchestration case changes both container ID and host port after
+restart and verifies that the workflows receive the new validated URL.
+
+Using the actual exported override string and synthetic environment variables,
+`docker compose ... config --format json` passed these assertions without a
+daemon: base staging has exactly one loopback mapping published on 8123; smoke
+has exactly one loopback 8122/TCP mapping with no `published` field. Resolved
+configurations are deeply equal after removing only the app `ports` field.
+This proves staging defaults and all other settings are preserved **statically**;
+it does not prove Linux runtime publication.
+
+### Phase 6.2 validation and acceptance
+
+Commands actually executed:
+
+```bash
+# server/
+pnpm exec vitest run tests/runtime/docker-smoke.test.ts
+pnpm typecheck
+pnpm build
+pnpm exec node scripts/verify-schema-engine.mjs
+pnpm test
+node --check scripts/docker-smoke.mjs
+node --check scripts/docker-smoke-diagnostics.mjs
+node --check scripts/docker-smoke-ports.mjs
+# frontend/
+npm run build
+# repository root
+git diff --check
+git status --short
+```
+
+Also executed: read-only Docker availability/version commands and static Compose
+normalization/configuration comparison, with temporary empty environment files
+and synthetic credentials. The first focused typecheck identified two mock
+functions typed with no parameters; adding their actual argument signatures
+corrected the test typings without weakening assertions.
+
+| Phase 6.2 check | Actual result |
+| --- | --- |
+| Focused Docker smoke regressions | PASS: 37 tests (14 retained, 23 added) |
+| Full `pnpm test` | PASS; original 337 cases retained plus 23 added; existing Unix-only startup permission case skipped on Windows |
+| Typecheck and production TypeScript build | PASS |
+| Schema-engine verifier | PASS: separate disposable db-push/deploy, 28 app tables, clean FKs |
+| Frontend production build | PASS: 1,994 modules; existing Profile chunk warning only |
+| Three smoke-script syntax checks | PASS |
+| Exact generated Compose override / normal config comparison | PASS, static only; default 8123 and all other settings preserved |
+| Diff/new-file whitespace and scope checks | PASS |
+| Real Linux Docker smoke | BLOCKED / NOT RUN: Linux daemon unavailable |
+| New GitHub Actions run | NOT RUN: no commit, push or dispatch |
+
+All tests use disposable SQLite or synthetic metadata; no development database,
+production state, network settings or running service was modified. No package
+or dependency installation/change was required. Automatic cleanup and all prior
+security/provisioning assertions remain enabled.
+
+**Root-cause verdict:** the failing query is established; the engine/Compose
+reason and the role of explicit zero are **not established** by available
+evidence. The correction removes that dependency and adds validated inspection.
+**Real Linux acceptance:** full end-to-end smoke has **not passed**. The previous
+CI proves its images build and start, but the new publication/discovery logic and
+all downstream workflows still need an actual Linux Docker run. No new workflow
+was dispatched and no commit/push/deployment was performed. Runtime success is
+unverified locally because the Linux daemon is unavailable. Review this focused
+patch for a development-branch commit, then require the next complete CI run to
+pass before claiming staging acceptance or proceeding toward production.
