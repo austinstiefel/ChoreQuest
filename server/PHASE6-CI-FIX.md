@@ -369,3 +369,176 @@ was dispatched and no commit/push/deployment was performed. Runtime success is
 unverified locally because the Linux daemon is unavailable. Review this focused
 patch for a development-branch commit, then require the next complete CI run to
 pass before claiming staging acceptance or proceeding toward production.
+
+## Phase 6.3 — replace the internal-only staging bridge
+
+Starting branch/commit: `node-js-conversion` /
+`bec2664a3fa483aa7a39a93ef7d01a68d1794f45`. Tracked files were clean; existing
+untracked `changes-CI-Fix.diff` and `phase6.1-full-review.diff` were left untouched.
+
+### Third failed run and cause assessment
+
+Read actual run metadata, jobs and decoded logs for
+[run 40623038233](https://github.com/austinstiefel/ChoreQuest/actions/runs/40623038233),
+whose head matches the starting commit. Backend job `122601359591` passed
+**360/360 tests in 25 files with no skips**; frontend job `122601359233` passed.
+In [Linux-container job 122601985269](https://github.com/austinstiefel/ChoreQuest/actions/runs/40623038233/job/122601985269),
+runtime/provisioner builds, fresh provisioning, expected repeat refusal and health
+passed. Discovery then failed with:
+
+```json
+{"portIssue":"published_port_missing","requestedBindingCount":1,"publishedTargetCount":0,"publishedBindingCount":0}
+```
+
+The app was running/healthy with exit code 0. Both cleanup stages passed. This
+time live inspection proves the request was stored without a realized published
+mapping; this is not merely a `compose port` formatting failure. No host HTTP,
+WS or later container acceptance steps ran.
+
+The app's only network was `isolated`, configured with `internal: true`.
+[Docker's network documentation](https://docs.docker.com/reference/compose-file/networks/#internal)
+distinguishes externally isolated internal networks from normal external
+connectivity. [Moby discussion #53256](https://github.com/moby/moby/discussions/53256)
+reports the same internal-only bridge behavior: a healthy service, stored publish
+request, absent live port, and a working normal-bridge control. That independent
+report supports the proposed correction but does not reproduce this application.
+
+**Cause status: internal-only networking is the leading, evidence-supported
+hypothesis, not locally runtime-confirmed.** The installed Docker CLI exists
+(Compose v5.5.0), but `docker info` still fails because the Linux-engine pipe is
+absent. No daemon was started or infrastructure changed. A real Linux run after
+this correction is required before claiming the hypothesis proven or the issue
+fully resolved. Static parsing and synthetic tests cannot provide that proof.
+
+### Minimal configuration and security change
+
+Four files are changed:
+
+- `compose.staging.yml`: app now attaches to the project-scoped `staging` network
+  with `driver: bridge`, replacing `isolated: { internal: true }`. No explicit
+  shared network name, `external` reference or production proxy attachment is
+  added. The explicit `127.0.0.1:${STAGING_PORT:-8123}:8122` mapping is unchanged.
+- `docs/staging-runbook.md`: documents outbound connectivity, retains inbound
+  loopback restrictions, explains mocked push/no real subscription policy,
+  controlled real-push acceptance, and a proposed separate no-egress test mode.
+  Also documents the existing Compose >= 2.24.4 requirement and static-test CLI
+  selection through `CHOREQUEST_TEST_DOCKER`.
+- New `tests/runtime/docker-network.test.ts`: five tests parse both real normal
+  and ephemeral configurations using the installed Compose CLI, plus another
+  project name, without contacting a Docker daemon or creating containers.
+- `PHASE6-CI-FIX.md`: this evidence, security assessment, validation and verdict.
+
+**Security difference: the standard bridge may allow outbound traffic. Staging
+is no longer egress-blocked.** Host-local inbound publication remains explicit;
+there is no wildcard/host-network fallback. Independent project networks and
+volumes do not constitute an outbound firewall. Real provider acceptance needs
+operator-approved controlled outbound HTTPS, HTTPS/browser permission and VAPID
+configuration. Network capability is not authorization to send real push.
+
+Automated smoke still provisions only new synthetic data; its HTTP workflow
+does not create push subscriptions. The compiled push probe injects a mock sender
+and uses a separate `/tmp` database. It does not contact real push providers.
+Application-side push endpoint allowlisting is unchanged. No production database,
+uploads, credentials, external network or live service was used.
+
+For strict no-egress testing, the runbook proposes a separate disposable internal
+network with host publication removed and assertions run inside the container/
+network, or `network_mode: none` for local-only probes. That mode is **not** host
+HTTP/WS acceptance. No additional mode/network/firewall infrastructure was added.
+
+The Phase 6.2 override, exact container/project/service/running checks, single
+8122/TCP binding, exact 127.0.0.1 host IP, nonzero 1–65535 port, competing-map
+rejection and fresh restart discovery are unchanged. So are non-root image user,
+dropped capabilities, no-new-privileges, read-only root, private DB/uploads
+volumes, provisioning tools profile and `network_mode: none` for provisioner.
+Root Python Compose/Dockerfile, application/frontend/Python source, Prisma,
+dependencies and workflow were not modified. Existing CI runs the new tests
+through `pnpm test`; its real Docker job must still pass the complete smoke.
+
+### Focused test evidence
+
+**42 focused tests passed:** all existing 37 diagnostics/port/cleanup cases plus
+five new real-CLI static configuration tests. New assertions verify:
+
+1. Normal staging has exactly one 127.0.0.1:8123 → 8122/TCP mapping.
+2. The actual exported temporary override yields exactly one 127.0.0.1 mapping
+   with target 8122/TCP and `published` omitted, without retaining port 8123.
+3. App attaches only to a non-internal/non-external standard bridge; its resolved
+   name changes with Compose project (`<project>_staging`). No host networking.
+4. No fixed container name/privilege elevation, hardening unchanged, DB URL
+   unchanged, no host bind mounts, and named DB/uploads volumes scoped to the
+   test project. Provisioner remains opt-in and has no network.
+5. Normal and ephemeral configurations are identical except for app ports;
+   production Compose bytes remain unchanged during static inspection. Final
+   Git scope checks independently confirm no root deployment edits.
+
+These tests use explicit empty temporary environment files and synthetic config
+values. They do not parse the user's `.env`. Config digest comparison avoids
+printing resolved environment values. Static checks require the existing Docker
+Compose CLI, selected by PATH or `CHOREQUEST_TEST_DOCKER`; no daemon is required.
+The initial focused run correctly omitted the tools-profile service from default
+`config` output; the test now enables `--profile tools` **for inspection only**
+and verifies that provisioning remains opt-in. No application control was relaxed.
+
+### Commands and final results
+
+Executed with existing Git Bash Node 22/pnpm 10.34.6, explicit installed Docker
+CLI selection on Windows, and disposable database fixtures only:
+
+```bash
+# server/ (CHOREQUEST_TEST_DOCKER may select the existing Docker CLI)
+pnpm exec vitest run tests/runtime/docker-network.test.ts tests/runtime/docker-smoke.test.ts
+pnpm exec node scripts/verify-schema-engine.mjs
+pnpm build
+pnpm test
+pnpm typecheck
+node --check scripts/docker-smoke.mjs
+node --check scripts/docker-smoke-ports.mjs
+node --check scripts/docker-smoke-diagnostics.mjs
+node --check scripts/runtime-smoke.mjs
+node --check scripts/container-probes.mjs
+# frontend/
+npm run build
+# repository root
+git diff --check
+git status --short
+```
+
+Static validation invokes `docker compose --profile tools --project-name <test>
+--env-file <temporary-empty-file> -f <staging-file> [ -f <temporary-override> ]
+config --format json`, for both normal and smoke configuration and a second
+project. All generated configuration/files are removed afterwards. No `up`,
+`build`, `run`, network-creation or daemon command is part of these static tests.
+
+| Phase 6.3 check | Actual final result |
+| --- | --- |
+| Focused static-network + existing smoke tests | PASS: **42 tests** across two files (5 new, 37 retained) |
+| Full `pnpm test` | PASS: **364 passed, 1 skipped (365 collected), 26 files**; skip is the existing Unix-only unwritable-directory startup test on Windows |
+| Schema-engine verifier | PASS: separate disposable db-push/deploy, 28 application tables and clean FKs each |
+| `pnpm build` and `pnpm typecheck` | PASS |
+| Five relevant JavaScript syntax checks | PASS |
+| Frontend `npm run build` | PASS: 1,994 modules; existing large Profile chunk warning only |
+| Normal/ephemeral Compose static parsing | PASS with the real CLI; no daemon, containers or network requests |
+| Production Compose and Phase 6.2 discovery safeguards | Unchanged; verified by final Git scope inspection; original 37 tests still pass |
+| `git diff --check`, new-file whitespace/scope inspection | PASS; only four implementation/report files changed; index empty |
+| Full Linux Docker runtime | **BLOCKED / NOT RUN**: Linux-engine pipe unavailable |
+| New GitHub Actions execution | **NOT RUN**; no commit, push or dispatch |
+
+The complete command chain exited 0. No dependency/tool installation, database
+migration against real state, live service/daemon start or production-network
+operation was performed. Disposable integration fixtures used loopback test
+servers and cleaned them up afterwards.
+
+### Acceptance and remaining blockers
+
+**Real Linux acceptance: NOT RUN / UNVERIFIED for this correction.** Original CI
+verified builds, provisioning and internal health only. The next full Linux job
+must demonstrate an allocated loopback port, real host HTTP and authenticated WS,
+business workflow, native modules, WAL, mocked push, Unix permission rejection,
+SIGTERM and restart persistence. No mock/static result substitutes for that run.
+No GitHub workflow was dispatched and no commit/push/deployment was performed.
+
+Recommend an independently reviewed development-branch commit of this focused
+network correction after local gates pass. It is not production cutover approval
+or proof that internal-only networking was the sole cause. Linux publication and
+all downstream acceptance steps remain blockers until the actual next run passes.

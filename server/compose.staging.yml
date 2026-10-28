@@ -34,7 +34,7 @@ services:
     volumes:
       - database:/app/data
       - uploads:/app/data/uploads
-    networks: [isolated]
+    networks: [staging]
     init: true
     stop_grace_period: 75s
     security_opt: [no-new-privileges:true]
@@ -43,8 +43,10 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
 networks:
-  isolated:
-    internal: true
+  # Project-scoped bridge supports loopback host publishing. Outbound traffic
+  # is possible; this is not an egress-blocked/internal network.
+  staging:
+    driver: bridge
 volumes:
   database:
   uploads:

@@ -1,7 +1,7 @@
 # Isolated Node staging (opt-in)
 
 No command here changes the Python Compose service, proxy, DNS or live database.
-Use a Linux Docker host with Compose v2, Node 22 and pnpm 10.34.6. The image
+Use a Linux Docker host with Compose >= 2.24.4, Node 22 and pnpm 10.34.6. The image
 contains one Node process; do not scale replicas or run two application writers.
 The local Phase 6 authoring environment had no Docker Linux daemon. Container
 steps below must pass before treating this as a validated deployment.
@@ -24,6 +24,11 @@ SIGTERM, restarts and checks persistence. It removes only its own project and
 volumes in `finally`. It never sends push or connects to production. If interrupted
 forcibly, remove only the `chorequest-phase6-*` project identified by your run.
 Build failures are fatal, not a reason to upgrade dependencies or run as root.
+The smoke's temporary override requests an ephemeral host port on 127.0.0.1;
+normal staging keeps port 8123. Port discovery validates live container identity
+and the exact 8122/TCP loopback mapping, and repeats the query after restart.
+Static configuration tests require the Docker Compose CLI (no daemon needed);
+`CHOREQUEST_TEST_DOCKER` can explicitly select its executable if absent from PATH.
 
 ## Operator-controlled isolated instance
 
@@ -68,11 +73,29 @@ defaults generate and retain their own database-backed pair, never production's.
 
 Two project-scoped named volumes contain the DB and uploads. No bind mounts,
 external proxy network, fixed container names, public bind or production volume
-is used. The internal network blocks provider egress intentionally. Runtime
+is used. A standard bridge named `<project>_staging` is created for this project;
+it is neither external nor connected to the production proxy. The previous
+internal-only bridge could accept a publish request without a live host mapping
+(see the Phase 6.3 investigation in `../PHASE6-CI-FIX.md`).
+
+**Outbound connectivity is now possible. Staging is not egress-blocked.**
+Loopback-only inbound publishing does not restrict outbound traffic. Automated
+smoke workflows create no real push subscriptions and perform no real provider
+delivery. Compiled push probes use an injected mock sender and a separate
+disposable database; application endpoint validation remains enabled. Do not put
+real subscriptions or production credentials into staging. Runtime
 uses UID/GID 1000, read-only root filesystem, writable DB/upload volumes and
 bounded temporary storage, no added capabilities. Do not solve permission errors
 with `chmod 777` or root runtime. New volumes inherit image directory ownership;
 for operator-supplied restored state, provision UID/GID 1000 ownership privately.
+
+If strict no-egress checks are required, use a separate disposable project with
+an operator-reviewed `internal: true` network and published ports removed, and
+run assertions **inside** that network/container (or use `network_mode: none`
+for entirely local probes). That mode does not provide host-published HTTP/WS
+acceptance. It is a separate proposed test mode, not part of this runbook's
+standard bridge deployment or a reason to skip host reachability tests. No extra
+mode, firewall rule, or network has been installed by these changes.
 
 ```bash
 # Stop/restart without deleting data (run from repository root).
@@ -123,8 +146,11 @@ were performed. Local HTTP tests do not prove HTTPS cookie or wss behavior.
 
 ## Real browser push (operator approval required)
 
-The default internal network cannot send external push. Only after approving
-isolated provider egress and a private HTTPS staging host: log in as a synthetic
+The staging bridge may already permit provider egress, subject to host firewall
+policy. Real browser push acceptance requires explicitly approved, controlled
+outbound HTTPS to the browser's supported provider plus a private HTTPS staging
+host, valid VAPID identity and browser permission. Network capability alone is
+not permission to send. After approval, log in as a synthetic
 test parent, verify the service worker, request browser notification permission,
 subscribe, verify `/api/push/status`, and trigger `/api/push/test` as that parent.
 Confirm the correct device receives the payload and click opens the correct
