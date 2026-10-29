@@ -3,8 +3,34 @@
 No command here changes the Python Compose service, proxy, DNS or live database.
 Use a Linux Docker host with Compose >= 2.24.4, Node 22 and pnpm 10.34.6. The image
 contains one Node process; do not scale replicas or run two application writers.
-The local Phase 6 authoring environment had no Docker Linux daemon. Container
-steps below must pass before treating this as a validated deployment.
+Phase 6 Linux container acceptance passed at commit
+`4b85827e838b6de4017ba1a6f5d0aecb4f46feb8` in
+[run 40631656245](https://github.com/austinstiefel/ChoreQuest/actions/runs/40631656245).
+That proves the disposable HTTP/WS harness, not a private homelab deployment,
+trusted browser HTTPS/WSS, NPM integration or real browser push. See
+[`../PHASE7.md`](../PHASE7.md) for separate evidence and pending gates.
+
+All commands below are **operator-run after deployment authorization**, from the
+reviewed checkout on the selected Linux Docker host. They have not been executed
+against the homelab. Never use production data, volumes, networks or credentials.
+
+## Prerequisites and private topology
+
+Confirm `git rev-parse HEAD`, `node --version` (22), `pnpm --version` (10.34.6),
+`docker compose version` (>=2.24.4) and `docker info --format '{{.OSType}}'`
+(`linux`). Require free disk for images, DB/WAL, uploads and two recovery copies;
+Python 3.12 for the existing snapshot tool; Docker administration authorization;
+private filesystem/backup storage; and an approved private proxy/DNS plan.
+Docker access is effectively host administration. Never start a daemon or change
+another project to get past a failed prerequisite. Stop on any failed command.
+
+Browser -> internal DNS -> trusted HTTPS staging proxy -> app:8122 -> this
+project's SQLite/uploads volumes. The host diagnostic mapping stays
+127.0.0.1:8123; the project bridge permits egress. No public router forwarding,
+tunnel, wildcard bind or production proxy-network membership is required.
+An NPM container's 127.0.0.1 is its own loopback, not the Docker host's.
+Use the exact same-host or separate-VM operator procedure in
+[`staging-https-acceptance.md`](staging-https-acceptance.md) before browser login.
 
 ## Build and disposable smoke
 
@@ -36,16 +62,45 @@ The following Linux shell commands use a new private directory outside Git.
 Generate unique credentials; do not reuse the production signing key or accounts.
 
 ```bash
+set -euo pipefail
 umask 077
+# Clear inherited Compose overrides; the private file is authoritative.
+for variable in ${!STAGING_@}; do unset "$variable"; done
+staging_project="chorequest-phase7-$(date -u +%Y%m%d%H%M%S)-$(node -p "require('node:crypto').randomBytes(3).toString('hex')")"
+# Refuse reuse, including stopped containers or orphaned state.
+test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$staging_project")"
+test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$staging_project")"
+test -z "$(docker network ls -q --filter "label=com.docker.compose.project=$staging_project")"
 mkdir "$HOME/chorequest-staging-private"
 node server/scripts/create-staging-env.mjs "$HOME/chorequest-staging-private/staging.env"
 staging_env="$HOME/chorequest-staging-private/staging.env"
-docker compose --project-name chorequest-node-staging --env-file "$staging_env" -f server/compose.staging.yml build app provision
-docker compose --project-name chorequest-node-staging --env-file "$staging_env" -f server/compose.staging.yml run --rm provision
-docker compose --project-name chorequest-node-staging --env-file "$staging_env" -f server/compose.staging.yml up -d --wait app
+# Before starting, privately edit staging.env: STAGING_COOKIE_SECURE=true;
+# set a real STAGING_VAPID_CONTACT, review TZ/reset hour, leave CORS empty for
+# same-origin use. Never source/print this file. Do not log in over HTTP.
+dc() { docker compose --project-name "$staging_project" --env-file "$staging_env" -f server/compose.staging.yml "$@"; }
+dc --profile tools config --quiet
+dc build app provision
+# Record these non-secret image IDs with the checkout commit in private records.
+docker image inspect --format '{{.Id}}' chorequest-node-staging:phase6 chorequest-node-provision:phase6
+dc run --rm provision
+dc up -d --wait --wait-timeout 120 --scale app=1 app
 curl --fail http://127.0.0.1:8123/api/health
 curl --fail http://127.0.0.1:8123/api/auth/setup-status
 ```
+
+Record the generated project name privately and reuse it for lifecycle commands;
+do not regenerate it to operate on existing state. Image tags are mutable and
+base images/apt packages are not digest-pinned, so builds are lockfile-controlled
+but not bit-for-bit reproducible. Retain the reviewed built image IDs/digests;
+do not rebuild or pull new tags during a recovery rehearsal. The current defaults
+do not auto-restart after host reboot: after stopping, the operator explicitly
+starts the same project. Port conflicts must stop deployment, not trigger a
+wildcard bind or changes to another service.
+
+`up --wait` and `/api/health` establish process liveness only. Before acceptance,
+verify one app ID (`dc ps --quiet app`), private TLS, synthetic login, current role,
+authenticated read/write, file read, DB/WAL integrity and committed WS events.
+Use the browser checklist below; do not print login/refresh responses in shell.
 
 Read `STAGING_ADMIN_PASSWORD` privately in a trusted editor/password manager;
 log in as Admin. Never print the environment, `docker inspect` environment,
@@ -99,13 +154,39 @@ mode, firewall rule, or network has been installed by these changes.
 
 ```bash
 # Stop/restart without deleting data (run from repository root).
-docker compose --project-name chorequest-node-staging --env-file "$staging_env" -f server/compose.staging.yml stop -t 75 app
-docker compose --project-name chorequest-node-staging --env-file "$staging_env" -f server/compose.staging.yml up -d --wait app
-# REMOVE ONLY THIS DISPOSABLE PROJECT AND ITS DATA when finished:
-docker compose --project-name chorequest-node-staging --env-file "$staging_env" -f server/compose.staging.yml down --volumes --timeout 75
+dc stop -t 75 app
+dc up -d --wait --wait-timeout 120 --scale app=1 app
+# Stop and remove containers/network while KEEPING DB/uploads:
+dc down --timeout 75
+```
+
+Back up and restore using [`staging-state-recovery.md`](staging-state-recovery.md).
+Never run the provisioner against restored/existing state. No reset or retry loop
+is a recovery procedure. A failed provision/migration retains the isolated state
+for inspection and stops this procedure.
+
+Only after independent confirmation that the selected project is disposable,
+its recovery copy is verified, and any dedicated staging proxy is stopped and
+disconnected, may the operator delete its volumes. Production project selection
+is forbidden. Recheck exact Compose project ownership labels on **both** volumes
+and all selected containers; reject any foreign/external volume or container.
+In the same shell retaining the reviewed `dc`, project and env selections:
+
+```bash
+case "$staging_project" in chorequest-phase7-*) ;; *) exit 1 ;; esac
+test "$staging_project" != chorequest-node-staging
+read -r -p 'Type the full disposable project name to DELETE ITS DATA: ' confirmation
+test "$confirmation" = "$staging_project"
+# Destructive, explicitly selected staging resources only; never prune.
+dc down --volumes --timeout 75
 ```
 
 ## Proxy / HTTPS acceptance (documentation only)
+
+Follow [`staging-https-acceptance.md`](staging-https-acceptance.md) for topology,
+DNS-01, NPM logging/TLS configuration and the recorded browser/push checklist.
+The notes here describe the application contract; they do not authorize changes
+to an existing proxy or constitute acceptance evidence.
 
 An operator may later approve a private TLS staging host in Nginx Proxy Manager.
 Keep this Compose project off the production proxy network by default. A proxy
